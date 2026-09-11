@@ -1,0 +1,17 @@
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.log
+*.state
+*.state.tmp
+*.startup-state
+_*.png
+
+# 内部协作文档：面向 AI 执行者的目标/约定与开发流水，不随仓库分发
+AGENTS.md
+PROGRESS.md
+
+# 本机实际使用的配置：仓库只带 config.example.*，各人按自己的环境改
+config.yaml
+config.ini

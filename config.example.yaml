@@ -1,0 +1,71 @@
+# WinGlass 示例配置：复制成 config.yaml 后使用。
+# 规则优先级：blacklist > applications > global；应用专属规则里缺省的字段自动继承 global。
+# 所有字段的取值范围与默认值见 README.md 的「字段参考」。
+
+blacklist:
+  # 系统会话 / 登录 / 输入法：动这些容易出安全问题，建议原样保留
+  - process: "LogonUI.exe"
+  - process: "consent.exe"
+  - process: "LockApp.exe"
+  - process: "CredentialUIBroker.exe"
+  - process: "TextInputHost.exe"
+  - process: "ctfmon.exe"
+  - process: "TabTip.exe"
+  - process: "chsime.exe"
+  # 开始菜单 / 搜索 / 系统界面
+  - process: "SearchHost.exe"
+  - process: "StartMenuExperienceHost.exe"
+  - process: "ShellExperienceHost.exe"
+  # 自身就会画窗口的工具：加了磨砂只会互相打架
+  - process: "tacky-borders.exe"
+  - process: "yasb.exe"
+  - process: "SnippingTool.exe"
+  # 全屏游戏、播放器等按需自己补，例如：
+  # - process: "your-game.exe"
+  # - process: "PotPlayerMini64.exe"
+  # WinGlass 自己的窗口
+  - process: "winglass.exe"
+  - process: "winglass-config.exe"
+  # 桌面图标 / 任务栏本体：它们就是壁纸的一部分，加磨砂会出现黑块
+  - class_name: "Progman"
+  - class_name: "WorkerW"
+  - class_name: "Shell_TrayWnd"
+  - class_name: "Shell_SecondaryTrayWnd"
+  - class_name: "Windows.UI.Core.CoreWindow"
+  - class_name: "Credential Dialog Xaml Host"
+  - class_name: "IME"
+  - class_name: "MSCTFIME UI"
+  - class_name: "WinGlassBackdropWindow"
+
+global:
+  enabled: true
+  focused:                     # 聚焦态
+    target_opacity: 0.60       # 目标窗口内容让位程度，0.05–1.0（越低越透）
+    enable_glass: true         # 是否启用磨砂背板；关掉仍保留纯染色
+    glass_color: "#00345A"     # 玻璃颜色 #RRGGBB
+    glass_opacity: 0.98        # 玻璃浓度上限
+    tint_opacity: 0.38         # 染色强度
+    animation_duration_ms: 120 # 焦点切换动画时长（毫秒），0 = 立即切换
+  unfocused:                   # 失焦态：与聚焦态完全独立的另一套参数
+    target_opacity: 0.50
+    enable_glass: true
+    glass_color: "#00345A"
+    glass_opacity: 0.96
+    tint_opacity: 0.20
+    animation_duration_ms: 120
+
+# 针对单个程序的覆盖：只写要覆盖的字段，其余继承 global
+applications:
+  - match:
+      process: "msedge.exe"
+    rules:
+      - type: focused
+        config:
+          target_opacity: 0.60
+          glass_color: "#353E62"
+          tint_opacity: 0.40
+      - type: unfocused
+        config:
+          target_opacity: 0.20
+          glass_color: "#353E62"
+          tint_opacity: 0.34
