@@ -9,6 +9,8 @@
 #include <shellapi.h>
 #include <oleauto.h>
 
+#include "winglass-resource.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -739,7 +741,9 @@ NOTIFYICONDATAW MakeTrayIconData() {
     NOTIFYICONDATAW icon{};
     icon.cbSize = sizeof(icon); icon.hWnd = g_trayWindow; icon.uID = 1;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    icon.uCallbackMessage = kTrayMessage; icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    icon.uCallbackMessage = kTrayMessage;
+    icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    if (!icon.hIcon) icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION); // never end up with no icon at all
     wcscpy_s(icon.szTip, L"WinGlass \x5168\x5c40\x78e8\x7802\x73bb\x7483");
     return icon;
 }
@@ -846,8 +850,10 @@ LRESULT CALLBACK TrayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 }
 
 bool CreateTrayIcon() {
-    WNDCLASSW wc{}; wc.lpfnWndProc = TrayProc; wc.hInstance = g_instance; wc.lpszClassName = kTrayClass;
-    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = TrayProc; wc.hInstance = g_instance; wc.lpszClassName = kTrayClass;
+    wc.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         WriteDiagnostic(L"tray window class registration failed, error=" + std::to_wstring(GetLastError()));
         return false;
     }

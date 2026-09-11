@@ -2,6 +2,7 @@
 *.pdb
 *.ilk
 *.exe
+*.res
 *.log
 *.state
 *.state.tmp

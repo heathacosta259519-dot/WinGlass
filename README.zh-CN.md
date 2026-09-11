@@ -302,9 +302,12 @@ applications:
 ├─ winglass.cpp            # 主程序：窗口扫描、规则解析、Z 序编排、效果渲染、托盘、恢复
 ├─ winglass-watchdog.cpp   # 独立监护进程：崩溃后还原窗口样式
 ├─ winglass-config.cpp     # 可视化配置编辑器（Win32 + 通用控件）
+├─ winglass.rc             # 图标资源脚本（编译进三个 exe）
+├─ winglass-resource.h     # 共享的资源 ID
 ├─ build.ps1             # 一键构建（MSVC x64）
 ├─ config.example.yaml   # 示例配置（推荐写法，复制为 config.yaml 使用）
 ├─ config.example.ini    # 示例配置（兼容的 INI 写法）
+├─ assets/               # 图标设计源（svg / png / ico）
 ├─ docs/                 # README 用的截图
 ├─ README.md             # English
 └─ README.zh-CN.md       # 简体中文（本文件）

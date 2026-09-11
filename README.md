@@ -304,9 +304,12 @@ Design choices that keep the cost down: fully occluded or minimised windows are 
 ├─ winglass.cpp            # main program: window scanning, rule parsing, Z-order, rendering, tray, restore
 ├─ winglass-watchdog.cpp   # separate watchdog process: restores window styles after a crash
 ├─ winglass-config.cpp     # visual configuration editor (Win32 + common controls)
+├─ winglass.rc             # icon resource script (compiled into all three exes)
+├─ winglass-resource.h     # shared resource identifiers
 ├─ build.ps1               # one-shot build (MSVC x64)
 ├─ config.example.yaml     # example config (recommended flavour, copy to config.yaml)
 ├─ config.example.ini      # example config (INI flavour)
+├─ assets/                 # icon design sources (.svg / .png / .ico)
 ├─ docs/                   # screenshots used by the READMEs
 ├─ README.md               # English (this file)
 └─ README.zh-CN.md         # 简体中文

@@ -8,6 +8,8 @@
 #include <shellapi.h>
 #include <tlhelp32.h>
 
+#include "winglass-resource.h"
+
 #include <algorithm>
 #include <cwchar>
 #include <fstream>
@@ -873,13 +875,16 @@ LRESULT CALLBACK ProcessPickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 bool EnsureProcessPickerClass() {
     static bool registered = false;
     if (registered) return true;
-    WNDCLASSW windowClass{};
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = ProcessPickerProc;
     windowClass.hInstance = g_instance;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     windowClass.lpszClassName = L"WinGlassProcessPicker";
-    registered = RegisterClassW(&windowClass) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    windowClass.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    windowClass.hIconSm = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    registered = RegisterClassExW(&windowClass) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     return registered;
 }
 
@@ -1156,13 +1161,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_configPath = (slash == std::wstring::npos ? L"" : g_configPath.substr(0, slash + 1)) + L"config.yaml";
 
     g_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    WNDCLASSW windowClass{};
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = EditorProc;
     windowClass.hInstance = instance;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     windowClass.lpszClassName = L"WinGlassConfigEditor";
-    if (!RegisterClassW(&windowClass)) return 2;
+    windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    windowClass.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (!RegisterClassExW(&windowClass)) return 2;
 
     g_window = CreateWindowExW(WS_EX_APPWINDOW, windowClass.lpszClassName,
                                L"WinGlass \x914d\x7f6e\x7f16\x8f91\x5668", WS_OVERLAPPED | WS_CAPTION |

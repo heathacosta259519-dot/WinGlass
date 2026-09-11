@@ -1,0 +1,8 @@
+// WinGlass application icon.
+// The .ico carries 16/32/48/64/128/256 px frames so Explorer, the taskbar and
+// the notification area all get a crisp image. The SVG/PNG next to it are the
+// design sources and are not consumed by the build.
+
+#include "winglass-resource.h"
+
+IDI_WINGLASS_ICON ICON "assets\\winglass-icon.ico"
