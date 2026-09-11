@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WinGlass application icon
+  Visual idea: three offset glass panes form a subtle W, with a cyan highlight
+  and a small sparkle to communicate Windows acrylic and live composition.
+  The mark is intentionally text-free so it remains legible at tray-icon size.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <!-- Deep blue-violet base keeps the icon readable on light and dark desktops. -->
+    <linearGradient id="bg" x1="98" y1="40" x2="925" y2="1000" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#112B55"/>
+      <stop offset="0.48" stop-color="#172A67"/>
+      <stop offset="1" stop-color="#371D68"/>
+    </linearGradient>
+    <!-- Glass panes use a cool cyan-to-lilac sheen rather than a flat white fill. -->
+    <linearGradient id="glass" x1="190" y1="168" x2="823" y2="832" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#DDFBFF" stop-opacity="0.86"/>
+      <stop offset="0.33" stop-color="#8FE7F5" stop-opacity="0.54"/>
+      <stop offset="0.72" stop-color="#A0B8FF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#E1C7FF" stop-opacity="0.62"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="205" y1="157" x2="805" y2="864" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="0.46" stop-color="#B8F6FF" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#E8D5FF" stop-opacity="0.78"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="300" y1="250" x2="735" y2="730" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.62"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="80" y="100" width="864" height="860" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="28" stdDeviation="24" flood-color="#050B21" flood-opacity="0.44"/>
+    </filter>
+    <filter id="glow" x="650" y="100" width="260" height="260" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <clipPath id="frontClip">
+      <rect x="205" y="205" width="592" height="592" rx="116"/>
+    </clipPath>
+  </defs>
+
+  <!-- Rounded tile with a soft internal vignette. -->
+  <rect x="42" y="42" width="940" height="940" rx="228" fill="url(#bg)"/>
+  <rect x="62" y="62" width="900" height="900" rx="210" stroke="#A9DDFE" stroke-opacity="0.15" stroke-width="4"/>
+  <circle cx="794" cy="214" r="110" fill="#75E8FF" fill-opacity="0.22" filter="url(#glow)"/>
+
+  <!-- Offset rear pane: the exposed left and bottom edges create depth. -->
+  <g filter="url(#shadow)">
+    <rect x="145" y="266" width="592" height="592" rx="116" fill="#5B72D7" fill-opacity="0.30" stroke="#A8C5FF" stroke-opacity="0.48" stroke-width="12"/>
+    <rect x="178" y="232" width="592" height="592" rx="116" fill="#6DD8EA" fill-opacity="0.23" stroke="#C9F5FF" stroke-opacity="0.58" stroke-width="12"/>
+
+    <!-- Front pane is the hero shape; its outline remains visible when scaled down. -->
+    <rect x="205" y="205" width="592" height="592" rx="116" fill="url(#glass)" fill-opacity="0.66" stroke="url(#edge)" stroke-width="14"/>
+    <g clip-path="url(#frontClip)">
+      <!-- Diagonal highlight suggests light passing through frosted glass. -->
+      <path d="M190 315C335 203 504 185 844 206L844 382C586 333 397 367 190 524V315Z" fill="url(#shine)"/>
+      <!-- Minimal inner window geometry hints at a composed desktop window. -->
+      <path d="M316 430H686" stroke="#F6FEFF" stroke-opacity="0.64" stroke-width="18" stroke-linecap="round"/>
+      <path d="M316 506H598" stroke="#F6FEFF" stroke-opacity="0.42" stroke-width="18" stroke-linecap="round"/>
+      <path d="M316 582H520" stroke="#F6FEFF" stroke-opacity="0.30" stroke-width="18" stroke-linecap="round"/>
+      <circle cx="326" cy="346" r="17" fill="#EFFFFF" fill-opacity="0.86"/>
+      <circle cx="380" cy="346" r="17" fill="#C3F5FF" fill-opacity="0.65"/>
+      <circle cx="434" cy="346" r="17" fill="#C7CBFF" fill-opacity="0.58"/>
+    </g>
+  </g>
+
+  <!-- Sparkle: a small, high-contrast signal for “live glass” in the tray. -->
+  <path d="M793 132L812 190L870 209L812 228L793 286L774 228L716 209L774 190L793 132Z" fill="#FFFFFF" fill-opacity="0.96"/>
+  <path d="M793 160L804 198L842 209L804 220L793 258L782 220L744 209L782 198L793 160Z" fill="#C6FBFF"/>
+
+  <!-- Tiny specular flecks add polish without hurting small-size clarity. -->
+  <circle cx="835" cy="324" r="8" fill="#FFFFFF" fill-opacity="0.75"/>
+  <circle cx="863" cy="351" r="5" fill="#D9F9FF" fill-opacity="0.52"/>
+</svg>
