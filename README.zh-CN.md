@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/winglass-icon.svg" width="96" alt="WinGlass 图标">
+
 # WinGlass
 
 **Windows 11 全局磨砂玻璃。不注入、不 Hook、不 Patch。**

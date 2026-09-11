@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/winglass-icon.svg" width="96" alt="WinGlass icon">
+
 # WinGlass
 
 **Global frosted glass for Windows 11. No injection, no hooking, no patching.**
@@ -222,7 +224,7 @@ applications:
 | `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | Glass density ceiling |
 | `tint_opacity` | `active_tint_strength` / `inactive_tint_strength` | `0–1` | `0.34` / `0.30` | Tint strength |
 | `animation_duration_ms` | `transition_ms` | `0–5000` | `180` | Focus-transition duration; `0` = instant |
-| `blacklist: - process` | `进程名=true` under `[Blacklist]` | — | — | Skip by executable file name |
+| `blacklist: - process` | `<processname>=true` under `[Blacklist]` | — | — | Skip by executable file name |
 | `blacklist: - class_name` | YAML only | — | — | Skip by window class name |
 
 A few conventions:
