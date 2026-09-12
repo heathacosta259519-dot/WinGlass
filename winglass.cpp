@@ -946,12 +946,23 @@ bool FullscreenExclusionEnabled(HWND hwnd) {
     return rule.excludeFullscreen;
 }
 
+bool IsTooltipWindowClass(const std::wstring& className) {
+    // Native Win32 tooltips use tooltips_class32/msctls_tooltip32. Chromium
+    // based shells have used several private names over time, so match the
+    // stable "tooltip" token as well. Class matching is deliberately used
+    // instead of size/title heuristics to avoid hiding notification popups or
+    // small legitimate utility windows.
+    return className == L"tooltips_class32" || className == L"msctls_tooltip32" ||
+           className.find(L"tooltip") != std::wstring::npos;
+}
+
 bool IsExcluded(HWND hwnd) {
     if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return true;
     LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (ex & WS_EX_TOOLWINDOW) return true;
     wchar_t cls[128]{}; GetClassNameW(hwnd, cls, 128);
     const auto c = Lower(cls);
+    if (IsTooltipWindowClass(c)) return true;
     if (c == L"progman" || c == L"workerw" || c == L"shell_traywnd" ||
         c == L"shell_secondarytraywnd" || c == L"windows.ui.core.corewindow" ||
         c == L"winglassbackdropwindow") return true;

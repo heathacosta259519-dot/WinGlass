@@ -299,9 +299,10 @@ Design choices that keep the cost down: fully occluded or minimised windows are 
 1. **The blur radius cannot be changed.** The frost is rendered by DWM and its radius is hard-coded inside the system; there is no public API or registry key for it. `blur_strength` in the config is therefore ignored (kept only for backward compatibility). Fine-grained control would require a self-drawn blur, at the cost of real-time behaviour.
 2. **WPF windows may not work.** They typically paint a fully opaque surface and never yield their background; add the process to `blacklist` for those.
 3. **Full-screen exclusion is window-level**: it reliably handles a browser/player full-screen surface, but cannot identify the rectangle of an embedded HTML video inside an ordinary browser window.
-4. **System windows are skipped by default**: desktop, taskbar, secondary taskbars and UWP core windows are skipped directly by the program, as are all tool windows (`WS_EX_TOOLWINDOW`) and owned popups; the bundled example config additionally blacklists Start menu, Search and notification-area hosts. This avoids most cases where "beautifying" makes things look worse.
-5. **UWP / Store apps**: their content is self-drawn, so whether the background shows through depends on the app.
-6. Only a **Windows 11 + x64** build script is provided; other platforms need their own compiler flags.
+4. **Tooltips are skipped by default**: native `tooltips_class32` / `msctls_tooltip32` and browser classes containing `tooltip` are ignored by class name, without size/title heuristics.
+5. **System windows are skipped by default**: desktop, taskbar, secondary taskbars and UWP core windows are skipped directly by the program, as are all tool windows (`WS_EX_TOOLWINDOW`) and owned popups; the bundled example config additionally blacklists Start menu, Search and notification-area hosts. This avoids most cases where "beautifying" makes things look worse.
+6. **UWP / Store apps**: their content is self-drawn, so whether the background shows through depends on the app.
+7. Only a **Windows 11 + x64** build script is provided; other platforms need their own compiler flags.
 
 ## Project structure
 
