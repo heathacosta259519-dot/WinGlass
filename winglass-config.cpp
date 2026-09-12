@@ -89,7 +89,11 @@ enum ControlId {
     IDC_APP_RULES, IDC_REMOVE_APP_RULE,
     IDC_APP_F_TARGET, IDC_APP_F_GLASS, IDC_APP_F_COLOR, IDC_APP_F_GLASS_OPACITY, IDC_APP_F_TINT, IDC_APP_F_ANIMATION, IDC_APP_F_FULLSCREEN,
     IDC_APP_U_TARGET, IDC_APP_U_GLASS, IDC_APP_U_COLOR, IDC_APP_U_GLASS_OPACITY, IDC_APP_U_TINT, IDC_APP_U_ANIMATION, IDC_APP_U_FULLSCREEN,
-    IDC_SAVE, IDC_RELOAD, IDC_OPEN_FOLDER, IDC_EXIT, IDC_STATUS
+    IDC_SAVE, IDC_RELOAD, IDC_OPEN_FOLDER, IDC_EXIT, IDC_STATUS,
+    // Appended after the original ids so the values above keep their meaning.
+    // These are only ever used inside this process.
+    IDC_TABS,
+    IDC_APP_MATCH_CLASS, IDC_APP_MATCH_TITLE, IDC_APP_MATCH_AUMID
 };
 
 struct Controls {
@@ -131,11 +135,25 @@ struct Controls {
     HWND appUAnimation = nullptr;
     HWND appUFullscreen = nullptr;
     HWND status = nullptr;
+    HWND tabs = nullptr;
+    HWND appMatchClass = nullptr;
+    HWND appMatchTitle = nullptr;
+    HWND appMatchAumid = nullptr;
 } g_controls;
 
 HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
 HFONT g_font = nullptr;
+// The editor is split into one page per concern so that each page owns the
+// whole window. The appearance groups, the rule editor and the blacklist lists
+// used to compete for the same fixed vertical space, which left no room for the
+// matcher fields and would clip longer labels in another language.
+enum class EditorPage { Global = 0, Applications = 1, Blacklist = 2 };
+constexpr int kEditorPageCount = 3;
+std::vector<HWND> g_pageControls[kEditorPageCount];
+int g_activePage = 0;
+// Cleared while a control that must stay visible on every page is created.
+bool g_registerPageControls = true;
 std::wstring g_configPath;
 std::wstring g_originalText;
 EditorConfig g_config;
@@ -585,12 +603,38 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
     return true;
 }
 
+// Shows one page's controls and hides the others'. The tab strip and the
+// controls that belong to every page are registered to no page, so they are
+// never hidden.
+void ActivatePage(int page) {
+    if (page < 0 || page >= kEditorPageCount) return;
+    g_activePage = page;
+    for (int i = 0; i < kEditorPageCount; ++i) {
+        const int command = i == page ? SW_SHOW : SW_HIDE;
+        for (HWND control : g_pageControls[i]) if (control && IsWindow(control)) ShowWindow(control, command);
+    }
+    if (g_controls.tabs) SendMessageW(g_controls.tabs, TCM_SETCURSEL, page, 0);
+    // Group boxes and edit fields leave trails where one page replaces another,
+    // because the background belongs to the main window.
+    if (g_window) RedrawWindow(g_window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+// Which page a control lives on, so validation can reveal the page it is about
+// to complain about instead of reporting an error about a hidden field.
+int PageOfControl(HWND control) {
+    for (int i = 0; i < kEditorPageCount; ++i) {
+        if (std::find(g_pageControls[i].begin(), g_pageControls[i].end(), control) != g_pageControls[i].end()) return i;
+    }
+    return -1;
+}
+
 HWND MakeControl(const wchar_t* className, const wchar_t* text, DWORD style,
                  int id, int x, int y, int width, int height) {
     HWND control = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style,
                                    x, y, width, height, g_window,
                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
     if (control && g_font) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+    if (control && g_registerPageControls) g_pageControls[g_activePage].push_back(control);
     return control;
 }
 
@@ -682,12 +726,16 @@ void EnableAppRuleControls(bool enabled) {
         g_controls.appFTint, g_controls.appFAnimation, g_controls.appUTarget, g_controls.appUGlass,
         g_controls.appUColor, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation,
         g_controls.appFFullscreen, g_controls.appUFullscreen,
-        g_controls.removeAppRule
+        g_controls.removeAppRule,
+        g_controls.appMatchClass, g_controls.appMatchTitle, g_controls.appMatchAumid
     };
     for (HWND control : controls) if (control) EnableWindow(control, enabled);
 }
 
 void PutAppRule(const AppRule& rule) {
+    SetControlText(g_controls.appMatchClass, rule.className);
+    SetControlText(g_controls.appMatchTitle, rule.title);
+    SetControlText(g_controls.appMatchAumid, rule.aumid);
     PutAppearance(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
                   g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen);
     PutAppearance(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
@@ -735,6 +783,11 @@ bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
         appearance.excludeFullscreen = SendMessageW(fullscreen, BM_GETCHECK, 0, 0) == BST_CHECKED;
         return true;
     };
+    // The editor keeps the user's own spelling, so these values are trimmed but
+    // never lower-cased; the resident process normalises them for matching.
+    rule.className = Trim(ControlText(g_controls.appMatchClass));
+    rule.title = Trim(ControlText(g_controls.appMatchTitle));
+    rule.aumid = Trim(ControlText(g_controls.appMatchAumid));
     return read(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
                 g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen) &&
            read(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
@@ -1054,6 +1107,8 @@ bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
     appearance.targetOpacity = ParseDouble(ControlText(target), appearance.targetOpacity, 0.05, 1.0);
     appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ParseColor(ControlText(color), appearance.color)) {
+        const int page = PageOfControl(color);
+        if (page >= 0) ActivatePage(page);
         MessageBoxW(g_window, L"\x989c\x8272\x5fc5\x987b\x4f7f\x7528 #RRGGBB \x683c\x5f0f\x3002", L"\x989c\x8272\x65e0\x6548", MB_ICONWARNING);
         SetFocus(color);
         return false;
@@ -1833,9 +1888,16 @@ bool SaveFromControls() {
     }
     updated.blacklistProcesses = ReadLines(g_controls.blacklistProcesses);
     updated.blacklistClasses = ReadLines(g_controls.blacklistClasses);
-    if (g_selectedAppRule >= 0 && g_selectedAppRule < static_cast<int>(updated.appRules.size()) &&
-        !ReadAppRuleControls(updated.appRules[static_cast<size_t>(g_selectedAppRule)], true)) {
-        return false;
+    if (g_selectedAppRule >= 0 && g_selectedAppRule < static_cast<int>(updated.appRules.size())) {
+        AppRule& rule = updated.appRules[static_cast<size_t>(g_selectedAppRule)];
+        if (!ReadAppRuleControls(rule, true)) return false;
+        // The resident process drops a rule that matches nothing, so writing one
+        // would look saved and quietly do nothing.
+        if (!rule.AnyMatcher()) {
+            ActivatePage(static_cast<int>(EditorPage::Applications));
+            MessageBoxW(g_window, L"\x6bcf\x6761\x4e13\x5c5e\x89c4\x5219\x81f3\x5c11\x9700\x8981\x4e00\x4e2a\x5339\x914d\x6761\x4ef6\x3002", L"\x5339\x914d\x6761\x4ef6\x7f3a\x5931", MB_ICONWARNING);
+            return false;
+        }
     }
     if (!SaveConfigFile(updated, g_configPath)) {
         MessageBoxW(g_window, L"Could not write config.yaml.", L"Save failed", MB_ICONERROR);
@@ -1929,50 +1991,91 @@ void OpenConfigFolder() {
 }
 
 void CreateControls() {
+    // The tab strip belongs to no page, and neither do the note, the status
+    // line and the action buttons: those stay visible whichever page shows.
+    g_registerPageControls = false;
+    g_controls.tabs = MakeControl(WC_TABCONTROLW, L"", WS_CLIPSIBLINGS, IDC_TABS, 20, 12, 767, 30);
+    if (g_controls.tabs) {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        const wchar_t* titles[kEditorPageCount] = {
+            L"\x5168\x5c40",              // Global
+            L"\x4e13\x5c5e\x89c4\x5219",  // Applications
+            L"\x9ed1\x540d\x5355"         // Blacklist
+        };
+        for (int i = 0; i < kEditorPageCount; ++i) {
+            item.pszText = const_cast<wchar_t*>(titles[i]);
+            TabCtrl_InsertItem(g_controls.tabs, i, &item);
+        }
+    }
+    g_registerPageControls = true;
+
+    g_activePage = static_cast<int>(EditorPage::Global);
     g_controls.enabled = MakeControl(L"BUTTON", L"\x5168\x5c40\x542f\x7528 WinGlass", BS_AUTOCHECKBOX,
-                                     IDC_ENABLED, 24, 18, 260, 24);
+                                     IDC_ENABLED, 24, 60, 300, 24);
     // Experimental wallpaper helper: the palette dialog reads a screenshot
     // from the clipboard, so nothing here depends on where the wallpaper comes
     // from (plain image, live wallpaper, slideshow, ...).
     MakeControl(L"BUTTON", L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272\xff08\x5b9e\x9a8c\xff09", 0,
-                IDC_PALETTE_OPEN, 298, 14, 200, 30);
-    MakeLabel(L"\x622a\x56fe\x540e\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x6b64\x5206\x6790", 508, 18, 270);
-    MakeAppearanceGroup(L"\x805a\x7126\x7a97\x53e3", IDC_F_TARGET, 20, 55);
-    MakeAppearanceGroup(L"\x5931\x6d3b\x7a97\x53e3", IDC_U_TARGET, 405, 55);
+                IDC_PALETTE_OPEN, 24, 96, 220, 30);
+    MakeLabel(L"\x622a\x56fe\x540e\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x6b64\x5206\x6790", 258, 102, 500);
+    MakeAppearanceGroup(L"\x805a\x7126\x7a97\x53e3", IDC_F_TARGET, 20, 145);
+    MakeAppearanceGroup(L"\x5931\x6d3b\x7a97\x53e3", IDC_U_TARGET, 405, 145);
 
-    MakeControl(L"BUTTON", L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", BS_GROUPBOX, 0, 20, 315, 750, 115);
-    MakeLabel(L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", 35, 343, 90);
-    g_controls.selectedProcess = MakeLabel(L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", 125, 343, 420);
+    g_activePage = static_cast<int>(EditorPage::Applications);
+    MakeControl(L"BUTTON", L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", BS_GROUPBOX, 0, 20, 55, 750, 120);
+    MakeLabel(L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", 35, 85, 90);
+    g_controls.selectedProcess = MakeLabel(L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", 125, 85, 420);
     g_controls.pickProcess = MakeControl(L"BUTTON", L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b...", 0,
-                                         IDC_PICK_PROCESS, 565, 338, 165, 28);
+                                         IDC_PICK_PROCESS, 565, 80, 165, 28);
     g_controls.addProcessBlacklist = MakeControl(L"BUTTON", L"\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x4fdd\x5b58", 0,
-                                                   IDC_ADD_PROCESS_BLACKLIST, 350, 368, 170, 25);
+                                                  IDC_ADD_PROCESS_BLACKLIST, 350, 115, 170, 25);
     g_controls.addAppRule = MakeControl(L"BUTTON", L"\x521b\x5efa\x4e13\x5c5e\x89c4\x5219", 0,
-                                         IDC_ADD_APP_RULE, 530, 368, 130, 25);
-    MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 399, 100);
+                                         IDC_ADD_APP_RULE, 530, 115, 130, 25);
+    MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 148, 100);
     g_controls.appRules = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                      IDC_APP_RULES, 125, 396, 360, 220);
-    g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0, IDC_REMOVE_APP_RULE, 500, 396, 120, 25);
+                                      IDC_APP_RULES, 125, 145, 360, 220);
+    g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0,
+                                            IDC_REMOVE_APP_RULE, 500, 145, 120, 25);
     SetSelectedProcess(L"", L"");
 
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", IDC_APP_F_TARGET, 20, 445, true);
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", IDC_APP_U_TARGET, 405, 445, false);
+    // Match conditions. Any field left empty simply does not take part, so a
+    // rule can be as broad as one title fragment or as narrow as a package
+    // identity plus a window class.
+    MakeControl(L"BUTTON", L"\x5339\x914d\x6761\x4ef6\xff08\x7a7a\x5219\x4e0d\x53c2\x4e0e\x5339\x914d\xff09",
+                BS_GROUPBOX, 0, 20, 190, 750, 150);
+    MakeLabel(L"\x7a97\x53e3\x7c7b\x540d", 35, 226, 120);
+    g_controls.appMatchClass = MakeEdit(IDC_APP_MATCH_CLASS, 165, 222, 240);
+    MakeLabel(L"\x6807\x9898\x5305\x542b", 35, 258, 120);
+    g_controls.appMatchTitle = MakeEdit(IDC_APP_MATCH_TITLE, 165, 254, 460);
+    MakeLabel(L"\x5e94\x7528\x5305\x6807\x8bc6\xff08" L"AUMID\xff09", 35, 290, 120);
+    g_controls.appMatchAumid = MakeEdit(IDC_APP_MATCH_AUMID, 165, 286, 560);
+    MakeLabel(L"\x5546\x5e97\x5e94\x7528\x7684\x5305\x6807\x8bc6\xff0c\x4f8b\xff1a Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", 35, 316, 700);
 
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 20, 693, 365, 150);
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 405, 693, 365, 150);
+    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", IDC_APP_F_TARGET, 20, 355, true);
+    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", IDC_APP_U_TARGET, 405, 355, false);
+
+    g_activePage = static_cast<int>(EditorPage::Blacklist);
+    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 20, 55, 365, 240);
     g_controls.blacklistProcesses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                                  IDC_BLACK_PROCESSES, 35, 728, 335, 95);
+                                                  IDC_BLACK_PROCESSES, 35, 90, 335, 185);
+    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 405, 55, 365, 240);
     g_controls.blacklistClasses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                               IDC_BLACK_CLASSES, 420, 728, 335, 95);
+                                               IDC_BLACK_CLASSES, 420, 90, 335, 185);
+    MakeLabel(L"\x547d\x4e2d\x9ed1\x540d\x5355\x7684\x7a97\x53e3\x88ab\x5b8c\x5168\x8df3\x8fc7\xff0c\x4e0d\x6e32\x67d3\x4e5f\x4e0d\x4fee\x6539\x6837\x5f0f\x3002", 24, 315, 740);
     SendMessageW(g_controls.blacklistProcesses, EM_SETLIMITTEXT, 8192, 0);
     SendMessageW(g_controls.blacklistClasses, EM_SETLIMITTEXT, 8192, 0);
 
+    g_registerPageControls = false;
     MakeLabel(L"\x9ed1\x540d\x5355\x4e0e\x4e13\x5c5e\x89c4\x5219\x4f1a\x5199\x5165 config.yaml\xff0c\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x5e94\x7528\x3002", 24, 858, 740);
     g_controls.status = MakeLabel(L"", 24, 882, 740);
     MakeControl(L"BUTTON", L"\x4fdd\x5b58\x5e76\x5e94\x7528", BS_DEFPUSHBUTTON, IDC_SAVE, 410, 913, 150, 30);
     MakeControl(L"BUTTON", L"\x91cd\x65b0\x52a0\x8f7d", 0, IDC_RELOAD, 570, 913, 90, 30);
     MakeControl(L"BUTTON", L"\x6253\x5f00\x6587\x4ef6\x5939", 0, IDC_OPEN_FOLDER, 670, 913, 100, 30);
     MakeControl(L"BUTTON", L"\x5173\x95ed", 0, IDC_EXIT, 300, 913, 90, 30);
+    g_registerPageControls = true;
+
+    ActivatePage(static_cast<int>(EditorPage::Global));
 }
 
 LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1985,6 +2088,15 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         CreateControls();
         ReloadFromDisk();
         return 0;
+    case WM_NOTIFY:
+        if (lParam) {
+            const NMHDR* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header->idFrom == IDC_TABS && header->code == TCN_SELCHANGE) {
+                ActivatePage(TabCtrl_GetCurSel(g_controls.tabs));
+                return 0;
+            }
+        }
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_SAVE: SaveFromControls(); return 0;
@@ -2078,7 +2190,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     // its image-list support is only dependable after explicit initialization.
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);
-    commonControls.dwICC = ICC_LISTVIEW_CLASSES;
+    commonControls.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES;
     InitCommonControlsEx(&commonControls);
     wchar_t module[MAX_PATH]{};
     GetModuleFileNameW(nullptr, module, MAX_PATH);
