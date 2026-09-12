@@ -8,6 +8,9 @@
 #include <psapi.h>
 #include <shellapi.h>
 #include <oleauto.h>
+// GetApplicationUserModelId: the package identity is the only reliable way to
+// tell two Store/MSIX applications apart, because they share one host process.
+#include <appmodel.h>
 
 #include "winglass-resource.h"
 
@@ -18,6 +21,7 @@
 #include <cwctype>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <string>
@@ -60,13 +64,46 @@ struct Rule {
     bool excludeFullscreen = true;
 };
 
+// One entry of the `applications` section.  Every matcher that is present must
+// match the window, so an entry can be as broad as a title substring or as
+// narrow as one package identity.  An entry with no matcher never applies.
+//
+// The executable name alone cannot separate the applications Windows hosts
+// inside a shared process: every Store/MSIX window arrives as
+// ApplicationFrameHost.exe, which made "allow Notepad but not Calculator"
+// impossible before the package identity became a matcher.
+struct AppRule {
+    std::wstring process;    // lower-case executable file name
+    std::wstring className;  // lower-case window class name
+    std::wstring title;      // lower-case substring of the window title
+    std::wstring aumid;      // lower-case package identity (Store/MSIX apps)
+    Rule rule{};
+
+    bool AnyMatcher() const { return !process.empty() || !className.empty() || !title.empty() || !aumid.empty(); }
+    // How much a matcher is trusted.  A rule that names a process must win
+    // over one that only inspects a title, no matter which one the file lists
+    // first; a broad rule silently shadowing a precise one is the kind of bug
+    // that is impossible to explain to the person who wrote both.
+    int Rank() const {
+        if (!process.empty()) return 0;
+        if (!aumid.empty()) return 1;
+        if (!className.empty()) return 2;
+        return 3;
+    }
+};
+
 struct Config {
     Rule global;
-    std::unordered_map<std::wstring, Rule> apps;
+    // Ordered: the first matching entry wins.  Sorted by rank while loading.
+    std::vector<AppRule> apps;
     std::unordered_map<std::wstring, bool> blacklist;
     std::unordered_map<std::wstring, bool> blacklistClasses;
     FILETIME writeTime{};
     bool loaded = false;
+    // Set while any entry matches on the window title.  Such a rule can start
+    // or stop applying while both the HWND and the configuration stay exactly
+    // the same, so rule resolution cannot be limited to configuration reloads.
+    bool anyTitleMatcher = false;
 };
 
 struct WindowState {
@@ -180,6 +217,15 @@ std::wstring Trim(const std::wstring& value) {
 
 std::wstring Lower(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(), towlower);
+    return value;
+}
+
+// Strips one layer of matching quotes. Shared by the YAML reader and by the
+// matcher fields, which accept the same quoted form in both configuration
+// flavours.
+std::wstring UnquoteYaml(std::wstring value) {
+    value = Trim(value);
+    if (value.size() >= 2 && ((value.front() == L'"' && value.back() == L'"') || (value.front() == L'\'' && value.back() == L'\''))) return value.substr(1, value.size() - 2);
     return value;
 }
 
@@ -410,22 +456,102 @@ void SetField(Rule& rule, const std::wstring& key, const std::wstring& value) {
     else if (k == L"exclude_fullscreen" || k == L"exclude_fullscreen_video") rule.excludeFullscreen = ParseBool(value, rule.excludeFullscreen);
 }
 
+// Which window property a matcher key addresses. Keeping the accepted spellings
+// in one place is what lets the YAML reader ask "is this key a matcher?" without
+// repeating the list.
+enum class MatchField { None, Process, ClassName, Title, Aumid };
+
+MatchField ClassifyMatchKey(const std::wstring& key) {
+    const auto k = Lower(Trim(key));
+    if (k == L"process" || k == L"match_process") return MatchField::Process;
+    if (k == L"class_name" || k == L"class" || k == L"match_class" || k == L"match_class_name") return MatchField::ClassName;
+    if (k == L"title" || k == L"match_title" || k == L"title_contains") return MatchField::Title;
+    if (k == L"aumid" || k == L"match_aumid" || k == L"package" || k == L"package_family_name") return MatchField::Aumid;
+    return MatchField::None;
+}
+
+// Matches the *window* rather than its appearance.  Both configuration
+// flavours accept these keys: YAML writes them inside the `match:` block, INI
+// writes them as extra keys of an [app:...] section.  Returns false when the
+// key is not a matcher, so the YAML reader can fall through to appearance.
+bool SetMatchField(AppRule& entry, const std::wstring& key, const std::wstring& rawValue) {
+    const auto value = Lower(UnquoteYaml(rawValue));
+    switch (ClassifyMatchKey(key)) {
+    case MatchField::Process: entry.process = value; return true;
+    case MatchField::ClassName: entry.className = value; return true;
+    case MatchField::Title: entry.title = value; return true;
+    case MatchField::Aumid: entry.aumid = value; return true;
+    case MatchField::None: break;
+    }
+    return false;
+}
+
+// An entry whose matchers are all empty would match every window and silently
+// swallow whatever reached it, so it is dropped rather than honoured.
+void FinalizeConfig(Config& config) {
+    config.apps.erase(std::remove_if(config.apps.begin(), config.apps.end(),
+                                     [](const AppRule& entry) { return !entry.AnyMatcher(); }),
+                      config.apps.end());
+    // A precise rule must win over a broad one regardless of file order: a
+    // title rule listed above a process rule must not shadow it.
+    std::stable_sort(config.apps.begin(), config.apps.end(),
+                     [](const AppRule& left, const AppRule& right) { return left.Rank() < right.Rank(); });
+    config.anyTitleMatcher = std::any_of(config.apps.begin(), config.apps.end(),
+                                         [](const AppRule& entry) { return !entry.title.empty(); });
+}
+
 bool SameFileTime(const FILETIME& a, const FILETIME& b) { return a.dwLowDateTime == b.dwLowDateTime && a.dwHighDateTime == b.dwHighDateTime; }
 
-bool LoadIniConfig(Config& result, const std::wstring& path) {
-    std::wifstream input(path);
+// Configuration files are read as UTF-8. std::wifstream widens every byte
+// instead, which quietly turns a Chinese window title written into a rule into
+// byte soup that can never match a real caption - and a title rule is exactly
+// where a non-ASCII value is most likely. A UTF-8 BOM is tolerated, and a file
+// that is not valid UTF-8 falls back to the active code page so an older ANSI
+// configuration still loads.
+bool ReadConfigText(const std::wstring& path, std::wstring& text) {
+    std::ifstream input(path, std::ios::binary);
     if (!input) return false;
+    const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    size_t offset = 0;
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF) offset = 3;
+    text.clear();
+    const int size = static_cast<int>(bytes.size() - offset);
+    if (size <= 0) return true;
+    const char* source = bytes.data() + offset;
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int wide = MultiByteToWideChar(codePage, flags, source, size, nullptr, 0);
+    if (wide <= 0) { codePage = CP_ACP; flags = 0; wide = MultiByteToWideChar(codePage, flags, source, size, nullptr, 0); }
+    if (wide <= 0) return false;
+    text.assign(static_cast<size_t>(wide), L'\0');
+    return MultiByteToWideChar(codePage, flags, source, size, text.data(), wide) > 0;
+}
+
+bool LoadIniConfig(Config& result, const std::wstring& path) {
+    std::wstring text;
+    if (!ReadConfigText(path, text)) return false;
+    std::wistringstream input(text);
     Config next;
     std::wstring section = L"global";
-    std::wstring appName;
+    int appIndex = -1;
     std::wstring line;
     while (std::getline(input, line)) {
         line = Trim(line);
         if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
         if (line.front() == L'[' && line.back() == L']') {
             section = Lower(Trim(line.substr(1, line.size() - 2)));
-            appName.clear();
-            if (section.rfind(L"app:", 0) == 0) { appName = Lower(Trim(section.substr(4))); next.apps[appName] = next.global; }
+            appIndex = -1;
+            if (section.rfind(L"app:", 0) == 0) {
+                const auto name = Trim(section.substr(4));
+                AppRule entry;
+                // "[app:*]" seeds a rule that is matched by its other keys
+                // alone, which is how a title-only rule is written in INI.
+                if (name != L"*" && !name.empty()) entry.process = Lower(name);
+                entry.rule = next.global;
+                next.apps.push_back(std::move(entry));
+                appIndex = static_cast<int>(next.apps.size()) - 1;
+            }
             continue;
         }
         const auto eq = line.find(L'=');
@@ -433,11 +559,12 @@ bool LoadIniConfig(Config& result, const std::wstring& path) {
         const auto key = Trim(line.substr(0, eq));
         const auto value = Trim(line.substr(eq + 1));
         if (section == L"global") SetField(next.global, key, value);
-        else if (section.rfind(L"app:", 0) == 0 && !appName.empty()) SetField(next.apps[appName], key, value);
+        else if (appIndex >= 0) { SetField(next.apps[appIndex].rule, key, value); SetMatchField(next.apps[appIndex], key, value); }
         else if (section == L"blacklist") next.blacklist[Lower(key)] = ParseBool(value, true);
     }
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) next.writeTime = data.ftLastWriteTime;
+    FinalizeConfig(next);
     next.loaded = true;
     result = std::move(next);
     return true;
@@ -451,12 +578,6 @@ std::wstring StripYamlComment(const std::wstring& line) {
         else if (c == L'#' && !quoted && (i == 0 || iswspace(line[i - 1]))) return line.substr(0, i);
     }
     return line;
-}
-
-std::wstring UnquoteYaml(std::wstring value) {
-    value = Trim(value);
-    if (value.size() >= 2 && ((value.front() == L'"' && value.back() == L'"') || (value.front() == L'\'' && value.back() == L'\''))) return value.substr(1, value.size() - 2);
-    return value;
 }
 
 double ParseFlexibleOpacity(const std::wstring& value, double fallback) {
@@ -482,13 +603,16 @@ void SetYamlStateField(Rule& rule, bool focused, const std::wstring& key, const 
 }
 
 bool LoadYamlConfig(Config& result, const std::wstring& path) {
-    std::wifstream input(path);
-    if (!input) return false;
+    std::wstring text;
+    if (!ReadConfigText(path, text)) return false;
+    std::wistringstream input(text);
     Config next;
-    std::wstring section, state, appName;
-    Rule appRule = next.global;
+    std::wstring section, state;
+    AppRule appEntry;
     bool appOpen = false;
-    auto commitApp = [&]() { if (appOpen && !appName.empty()) next.apps[Lower(appName)] = appRule; appOpen = false; appName.clear(); state.clear(); };
+    // Entries are collected in file order here and only ordered by specificity
+    // once the whole file has been read.
+    auto commitApp = [&]() { if (appOpen && appEntry.AnyMatcher()) next.apps.push_back(appEntry); appOpen = false; appEntry = AppRule{}; state.clear(); };
     std::wstring line;
     while (std::getline(input, line)) {
         line = StripYamlComment(line);
@@ -500,7 +624,8 @@ bool LoadYamlConfig(Config& result, const std::wstring& path) {
             commitApp(); section = Lower(Trim(body.substr(0, body.size() - 1))); state.clear(); continue;
         }
         std::wstring item = body;
-        if (!item.empty() && item.front() == L'-') item = Trim(item.substr(1));
+        const bool listItem = !item.empty() && item.front() == L'-';
+        if (listItem) item = Trim(item.substr(1));
         const auto colon = item.find(L':');
         const std::wstring key = colon == std::wstring::npos ? Lower(item) : Lower(Trim(item.substr(0, colon)));
         const std::wstring value = colon == std::wstring::npos ? L"" : Trim(item.substr(colon + 1));
@@ -518,17 +643,34 @@ bool LoadYamlConfig(Config& result, const std::wstring& path) {
             continue;
         }
         if (section == L"applications") {
-            if (key == L"match") { commitApp(); appOpen = true; appRule = next.global; state = L"match"; continue; }
-            if (key == L"process" && !value.empty() && (state == L"match" || !appOpen)) { if (!appOpen) { appOpen = true; appRule = next.global; } appName = UnquoteYaml(value); state = L"match"; continue; }
+            // A list item opens a new entry only when it names a matcher, the
+            // match block, or an appearance group. The `- type:` items nested
+            // under `rules:` are list items too, and they must stay inside the
+            // entry already open - treating every "- " line as a new entry
+            // silently moved a rule's appearance onto a following rule.
+            const bool opensEntry = listItem && (key == L"match" || key == L"focused" || key == L"unfocused" ||
+                                                 ClassifyMatchKey(key) != MatchField::None);
+            if (opensEntry) {
+                commitApp();
+                appOpen = true;
+                appEntry = AppRule{};
+                appEntry.rule = next.global;
+                state.clear();
+            }
+            if (key == L"match") { state = L"match"; continue; }
+            // A matcher written directly on the list item is the short form and
+            // opens an entry on its own.
+            if (appOpen && (state == L"match" || opensEntry) && SetMatchField(appEntry, key, value)) { state = L"match"; continue; }
             if (key == L"focused" || key == L"unfocused") { state = key; continue; }
             if (key == L"type") { state = Lower(UnquoteYaml(value)); continue; }
             if (key == L"config" || key == L"rules") continue;
-            if (appOpen && (state == L"focused" || state == L"unfocused")) SetYamlStateField(appRule, state == L"focused", key, value);
+            if (appOpen && (state == L"focused" || state == L"unfocused")) SetYamlStateField(appEntry.rule, state == L"focused", key, value);
         }
     }
     commitApp();
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) next.writeTime = data.ftLastWriteTime;
+    FinalizeConfig(next);
     next.loaded = true;
     result = std::move(next);
     return true;
@@ -892,6 +1034,67 @@ std::wstring ProcessName(HWND hwnd) {
     return result;
 }
 
+std::wstring WindowClassName(HWND hwnd) {
+    wchar_t cls[128]{};
+    GetClassNameW(hwnd, cls, 128);
+    return Lower(cls);
+}
+
+// GetWindowText does not send WM_GETTEXT across processes: for a foreign window
+// User32 returns the cached caption, so this stays cheap and cannot be blocked
+// by an unresponsive application.
+std::wstring WindowTitle(HWND hwnd) {
+    wchar_t title[512]{};
+    const int length = GetWindowTextW(hwnd, title, 512);
+    if (length <= 0) return L"";
+    return Lower(std::wstring(title, static_cast<size_t>(length)));
+}
+
+// Store/MSIX applications all arrive as ApplicationFrameHost.exe, and the
+// package identity that tells them apart belongs to the *hosted* process. The
+// hosted application draws into a child window owned by that other process, so
+// the first child with a different process id is the one to ask.
+struct HostedProcessProbe {
+    DWORD hostPid = 0;
+    DWORD hostedPid = 0;
+};
+
+BOOL CALLBACK HostedProcessProc(HWND child, LPARAM value) {
+    auto& probe = *reinterpret_cast<HostedProcessProbe*>(value);
+    DWORD childPid = 0;
+    GetWindowThreadProcessId(child, &childPid);
+    if (childPid && childPid != probe.hostPid) { probe.hostedPid = childPid; return FALSE; }
+    return TRUE;
+}
+
+std::wstring AumidForWindow(HWND hwnd, const std::wstring& process) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return L"";
+    if (process == L"applicationframehost.exe") {
+        HostedProcessProbe probe{};
+        probe.hostPid = pid;
+        EnumChildWindows(hwnd, HostedProcessProc, reinterpret_cast<LPARAM>(&probe));
+        if (!probe.hostedPid) return L"";
+        pid = probe.hostedPid;
+    }
+    HANDLE processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!processHandle) return L"";
+    // The API reports the size it needs, which avoids depending on a maximum
+    // constant that not every SDK header defines.
+    UINT32 length = 0;
+    std::wstring aumid;
+    if (GetApplicationUserModelId(processHandle, &length, nullptr) == ERROR_INSUFFICIENT_BUFFER && length > 0) {
+        aumid.assign(length, L'\0');
+        UINT32 written = length;
+        if (GetApplicationUserModelId(processHandle, &written, aumid.data()) != ERROR_SUCCESS) aumid.clear();
+    }
+    CloseHandle(processHandle);
+    // c_str() drops the terminator the API counted, then normalise for the
+    // case-insensitive comparison against configuration values.
+    return aumid.empty() ? std::wstring() : Lower(std::wstring(aumid.c_str()));
+}
+
 // Forward declaration because full-screen exclusion is part of the generic
 // window filter, while the application-specific rule lookup is defined below.
 Rule RuleFor(HWND hwnd, std::wstring& process);
@@ -960,8 +1163,7 @@ bool IsExcluded(HWND hwnd) {
     if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return true;
     LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (ex & WS_EX_TOOLWINDOW) return true;
-    wchar_t cls[128]{}; GetClassNameW(hwnd, cls, 128);
-    const auto c = Lower(cls);
+    const auto c = WindowClassName(hwnd);
     if (IsTooltipWindowClass(c)) return true;
     if (c == L"progman" || c == L"workerw" || c == L"shell_traywnd" ||
         c == L"shell_secondarytraywnd" || c == L"windows.ui.core.corewindow" ||
@@ -971,11 +1173,44 @@ bool IsExcluded(HWND hwnd) {
     return FullscreenExclusionEnabled(hwnd);
 }
 
+// Collects only the identifiers a rule actually asks for. A rule table that
+// matches on the executable name alone therefore never pays for a window title
+// read, and the UWP host probe only runs when an entry really needs a package
+// identity. This matters because the 8 ms foreground check reaches this code
+// whenever the foreground window is full-screen shaped.
+class WindowIdentity {
+public:
+    explicit WindowIdentity(HWND hwnd) : hwnd_(hwnd) {}
+    const std::wstring& Process() { if (!processKnown_) { process_ = ProcessName(hwnd_); processKnown_ = true; } return process_; }
+    const std::wstring& ClassName() { if (!classKnown_) { class_ = WindowClassName(hwnd_); classKnown_ = true; } return class_; }
+    const std::wstring& Title() { if (!titleKnown_) { title_ = WindowTitle(hwnd_); titleKnown_ = true; } return title_; }
+    const std::wstring& Aumid() { if (!aumidKnown_) { aumid_ = AumidForWindow(hwnd_, Process()); aumidKnown_ = true; } return aumid_; }
+
+private:
+    HWND hwnd_;
+    std::wstring process_, class_, title_, aumid_;
+    bool processKnown_ = false, classKnown_ = false, titleKnown_ = false, aumidKnown_ = false;
+};
+
+// Every matcher that is present must match, cheapest and most specific first,
+// so one rejection short-circuits the expensive lookups.
+bool MatchesAppRule(const AppRule& entry, WindowIdentity& identity) {
+    if (!entry.process.empty() && entry.process != identity.Process()) return false;
+    if (!entry.aumid.empty() && entry.aumid != identity.Aumid()) return false;
+    if (!entry.className.empty() && entry.className != identity.ClassName()) return false;
+    if (!entry.title.empty() && identity.Title().find(entry.title) == std::wstring::npos) return false;
+    return true;
+}
+
 Rule RuleFor(HWND hwnd, std::wstring& process) {
-    process = ProcessName(hwnd);
+    WindowIdentity identity(hwnd);
+    process = identity.Process();
     Rule rule = g_config.global;
-    const auto it = g_config.apps.find(process);
-    if (it != g_config.apps.end()) rule = it->second;
+    // Config::apps is ordered by specificity, so the first match is the most
+    // precise rule the file describes.
+    for (const AppRule& entry : g_config.apps) {
+        if (MatchesAppRule(entry, identity)) { rule = entry.rule; break; }
+    }
     return rule;
 }
 
@@ -1222,7 +1457,12 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
     if (it == g_windows.end()) {
         if (!ResolveRule(hwnd, rule)) return false;
     } else {
-        if (refreshRule && it->second.ruleRevision != g_configRevision) {
+        // A title rule can start or stop matching with no configuration change
+        // at all, so those rules are re-evaluated on every sweep instead of
+        // only after a reload. A failure here is finished off by Sweep, which
+        // restores the window instead of suspending it.
+        const bool stale = it->second.ruleRevision != g_configRevision || g_config.anyTitleMatcher;
+        if (refreshRule && stale) {
             if (!ResolveRule(hwnd, rule)) return false;
         } else {
             rule = it->second.rule;
@@ -1234,6 +1474,16 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
         fresh.currentOpacity = 1.0; fresh.fromOpacity = 1.0; fresh.toOpacity = 1.0;
         GetWindowThreadProcessId(hwnd, &fresh.processId);
         if (!fresh.processId) return false;
+        // Record the package identity once per newly tracked window. Every
+        // Store application arrives as ApplicationFrameHost.exe, so this line
+        // is where a user reads the value an `aumid` rule expects.
+        {
+            const std::wstring owner = ProcessName(hwnd);
+            if (owner == L"applicationframehost.exe") {
+                const std::wstring aumid = AumidForWindow(hwnd, owner);
+                if (!aumid.empty()) WriteDiagnostic(L"hosted window package identity: " + aumid);
+            }
+        }
         fresh.originalExStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE); LONG_PTR ex = fresh.originalExStyle;
         fresh.hadLayeredStyle = (ex & WS_EX_LAYERED) != 0;
         // Per-pixel layered windows cannot be reconstructed from constant-alpha
@@ -1507,7 +1757,10 @@ void Sweep(HWND foreground, ULONGLONG now) {
             it = g_windows.erase(it);
             continue;
         }
-        if (it->second.ruleRevision != g_configRevision) {
+        // Mirrors ApplyWindow: a title rule can stop matching without any
+        // configuration change, and suspending here would leave the target
+        // translucent with its companion windows hidden.
+        if (it->second.ruleRevision != g_configRevision || g_config.anyTitleMatcher) {
             Rule currentRule{};
             if (!ResolveRule(it->first, currentRule)) {
                 DestroyState(it->second);
@@ -1570,6 +1823,20 @@ int SelfTest() {
     if (!LoadConfig(g_config, g_configPath)) { std::fwprintf(stderr, L"config load failed: %ls\n", g_configPath.c_str()); return 2; }
     if (!RunCompositionSelfTest()) { std::fwprintf(stderr, L"system Acrylic composition unavailable\n"); return 3; }
     std::wprintf(L"config and system Acrylic API ok: %ls global enabled=%d active_target=%.2f glass=%.2f apps=%zu blacklist=%zu classes=%zu transition_ms=%d\n", g_configPath.c_str(), g_config.global.enabled ? 1 : 0, g_config.global.activeOpacity, g_config.global.activeGlassOpacity, g_config.apps.size(), g_config.blacklist.size(), g_config.blacklistClasses.size(), g_config.global.transitionMs);
+    // Listing the resolved matchers makes a rule that failed to parse visible
+    // without having to watch a window behave differently. Specificity order is
+    // what decides which entry wins, so it is printed in resolution order.
+    for (size_t index = 0; index < g_config.apps.size(); ++index) {
+        const AppRule& entry = g_config.apps[index];
+        std::wprintf(L"  rule[%zu] process=%ls class=%ls title=%ls aumid=%ls active_target=%.2f glass=%d enabled=%d\n", index,
+                     entry.process.empty() ? L"-" : entry.process.c_str(),
+                     entry.className.empty() ? L"-" : entry.className.c_str(),
+                     entry.title.empty() ? L"-" : entry.title.c_str(),
+                     entry.aumid.empty() ? L"-" : entry.aumid.c_str(),
+                     entry.rule.activeOpacity,
+                     entry.rule.activeAcrylic ? 1 : 0,
+                     entry.rule.enabled ? 1 : 0);
+    }
     return 0;
 }
 

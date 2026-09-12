@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cwchar>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -48,10 +49,19 @@ struct Appearance {
 
 struct AppRule {
     // WinGlass matches permanent rules by executable name, not the ephemeral
-    // PID displayed by the process picker.
+    // PID displayed by the process picker. The remaining matchers narrow the
+    // rule further: every matcher that is set must match, and a rule may have
+    // no process name at all (a title-only rule). The editor preserves them
+    // verbatim, so opening a hand-written rule and saving it cannot silently
+    // reduce it to its process name.
     std::wstring process;
+    std::wstring className;
+    std::wstring title;
+    std::wstring aumid;
     Appearance focused{};
     Appearance unfocused{};
+
+    bool AnyMatcher() const { return !process.empty() || !className.empty() || !title.empty() || !aumid.empty(); }
 };
 
 struct ProcessCandidate {
@@ -274,12 +284,53 @@ std::wstring ColorText(const Color& color) {
     return buffer;
 }
 
+// Configuration text is UTF-8 on disk. A std::wifstream widens every byte
+// instead of decoding, and a std::wofstream truncates every wide character to
+// one byte, so either one silently destroys the non-ASCII window title a rule
+// may legitimately carry. This mirrors the reader in winglass.cpp; the three
+// executables deliberately share no code beyond the resource identifiers.
 std::wstring ReadAll(const std::wstring& path) {
-    std::wifstream input(path);
+    std::ifstream input(path, std::ios::binary);
     if (!input) return L"";
-    std::wstringstream buffer;
-    buffer << input.rdbuf();
-    return buffer.str();
+    const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    size_t offset = 0;
+    if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF) offset = 3;
+    const int size = static_cast<int>(bytes.size() - offset);
+    if (size <= 0) return L"";
+    // A file that is not valid UTF-8 falls back to the active code page, so an
+    // older ANSI configuration still opens.
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int wide = MultiByteToWideChar(codePage, flags, bytes.data() + offset, size, nullptr, 0);
+    if (wide <= 0) { codePage = CP_ACP; flags = 0; wide = MultiByteToWideChar(codePage, flags, bytes.data() + offset, size, nullptr, 0); }
+    if (wide <= 0) return L"";
+    std::wstring text(static_cast<size_t>(wide), L'\0');
+    if (MultiByteToWideChar(codePage, flags, bytes.data() + offset, size, text.data(), wide) <= 0) return L"";
+    return text;
+}
+
+// Writes UTF-8 with CRLF line endings. Normalising here keeps the file's line
+// endings the same no matter what the edit controls handed back.
+bool WriteAll(const std::wstring& path, const std::wstring& text) {
+    std::wstring normalized;
+    normalized.reserve(text.size() + text.size() / 16);
+    for (const wchar_t c : text) {
+        if (c == L'\r') continue;
+        if (c == L'\n') normalized += L"\r\n";
+        else normalized += c;
+    }
+    const int size = static_cast<int>(normalized.size());
+    if (size <= 0) return false;
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, normalized.c_str(), size, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return false;
+    std::string encoded(static_cast<size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, normalized.c_str(), size, encoded.data(), bytes, nullptr, nullptr) <= 0) return false;
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+    output.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
+    output.flush();
+    return output.good();
 }
 
 void AddUnique(std::vector<std::wstring>& values, const std::wstring& value) {
@@ -298,6 +349,24 @@ void SetAppearanceField(Appearance& appearance, const std::wstring& key, const s
     else if (key == L"exclude_fullscreen" || key == L"exclude_fullscreen_video") appearance.excludeFullscreen = ParseBool(value, appearance.excludeFullscreen);
 }
 
+// Matcher keys accepted inside a YAML `match:` block or as extra keys of an INI
+// [App:...] section. Kept in one place so loading and saving cannot drift.
+bool IsMatcherKey(const std::wstring& key) {
+    return key == L"process" || key == L"class_name" || key == L"class" || key == L"title" ||
+           key == L"title_contains" || key == L"aumid" || key == L"package";
+}
+
+bool SetMatcher(AppRule& rule, const std::wstring& key, const std::wstring& rawValue) {
+    // The editor keeps the user's own spelling, so unlike the resident process
+    // it must not lower-case the value here.
+    const std::wstring value = Unquote(rawValue);
+    if (key == L"process") { rule.process = value; return true; }
+    if (key == L"class_name" || key == L"class") { rule.className = value; return true; }
+    if (key == L"title" || key == L"title_contains") { rule.title = value; return true; }
+    if (key == L"aumid" || key == L"package") { rule.aumid = value; return true; }
+    return false;
+}
+
 bool LoadYaml(EditorConfig& result, const std::wstring& text) {
     result = {};
     enum class Section { None, Global, Focused, Unfocused, Blacklist, Applications };
@@ -306,7 +375,7 @@ bool LoadYaml(EditorConfig& result, const std::wstring& text) {
     bool appOpen = false;
     bool appFocused = true;
     const auto commitRule = [&]() {
-        if (appOpen && !currentRule.process.empty()) result.appRules.push_back(std::move(currentRule));
+        if (appOpen && currentRule.AnyMatcher()) result.appRules.push_back(std::move(currentRule));
         currentRule = {};
         appOpen = false;
     };
@@ -324,7 +393,8 @@ bool LoadYaml(EditorConfig& result, const std::wstring& text) {
         if (indent == 0 && body == L"global:") { section = Section::Global; continue; }
         if (indent == 0 && body == L"blacklist:") { section = Section::Blacklist; continue; }
         std::wstring item = body;
-        if (!item.empty() && item.front() == L'-') item = Trim(item.substr(1));
+        const bool listItem = !item.empty() && item.front() == L'-';
+        if (listItem) item = Trim(item.substr(1));
         const size_t colon = item.find(L':');
         const std::wstring key = colon == std::wstring::npos ? item : Trim(item.substr(0, colon));
         const std::wstring value = colon == std::wstring::npos ? L"" : Trim(item.substr(colon + 1));
@@ -349,22 +419,18 @@ bool LoadYaml(EditorConfig& result, const std::wstring& text) {
             continue;
         }
         if (section == Section::Applications) {
-            if (key == L"match") {
+            // A list item opens a new rule when it names a matcher or the match
+            // block. The "- type:" items nested under rules: are list items too
+            // and must stay inside the rule that is already open.
+            const bool opensRule = listItem && (key == L"match" || IsMatcherKey(key));
+            if (opensRule) {
                 commitRule();
                 appOpen = true;
                 currentRule.focused = result.focused;
                 currentRule.unfocused = result.unfocused;
-                continue;
             }
-            if (key == L"process" && !value.empty()) {
-                if (!appOpen) {
-                    appOpen = true;
-                    currentRule.focused = result.focused;
-                    currentRule.unfocused = result.unfocused;
-                }
-                currentRule.process = Unquote(value);
-                continue;
-            }
+            if (key == L"match") continue;
+            if (appOpen && SetMatcher(currentRule, key, value)) continue;
             if (key == L"type") {
                 appFocused = Unquote(value) != L"unfocused";
                 continue;
@@ -463,14 +529,21 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
     };
     for (const auto& process : config.blacklistProcesses) if (!safeYamlName(process)) return false;
     for (const auto& className : config.blacklistClasses) if (!safeYamlName(className)) return false;
-    for (const auto& rule : config.appRules) if (!safeYamlName(rule.process)) return false;
+    for (const auto& rule : config.appRules) {
+        // A rule with no matcher would be dropped by the resident process, so
+        // writing one would silently widen the configuration instead of
+        // applying it.
+        if (!rule.AnyMatcher()) return false;
+        for (const std::wstring* matcher : {&rule.process, &rule.className, &rule.title, &rule.aumid}) {
+            if (!matcher->empty() && !safeYamlName(*matcher)) return false;
+        }
+    }
 
     // Write beside the destination and atomically replace it only after the
     // stream is known-good. A crash or full disk can no longer truncate the
     // user's last valid config.yaml halfway through a save.
     const std::wstring tempPath = path + L".tmp";
-    std::wofstream output(tempPath, std::ios::trunc);
-    if (!output) return false;
+    std::wostringstream output;
     output << L"# WinGlass configuration generated by winglass-config.exe\n"
            << L"# Changes are picked up automatically by the running WinGlass process.\n\n"
            << L"blacklist:\n";
@@ -483,9 +556,15 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
     if (!config.appRules.empty()) {
         output << L"\napplications:\n";
         for (const auto& rule : config.appRules) {
-            output << L"  - match:\n"
-                   << L"      process: \"" << rule.process << L"\"\n"
-                   << L"    rules:\n"
+            // Only the matchers that are actually set are written back: an empty
+            // matcher in the file would read as "match nothing" and change the
+            // rule's meaning on the next load.
+            output << L"  - match:\n";
+            if (!rule.process.empty()) output << L"      process: \"" << rule.process << L"\"\n";
+            if (!rule.className.empty()) output << L"      class_name: \"" << rule.className << L"\"\n";
+            if (!rule.title.empty()) output << L"      title: \"" << rule.title << L"\"\n";
+            if (!rule.aumid.empty()) output << L"      aumid: \"" << rule.aumid << L"\"\n";
+            output << L"    rules:\n"
                    << L"      - type: focused\n"
                    << L"        config:\n"
                    << AppearanceFieldsYaml(rule.focused, 10)
@@ -494,9 +573,7 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
                    << AppearanceFieldsYaml(rule.unfocused, 10);
         }
     }
-    output.flush();
-    const bool writeSucceeded = output.good();
-    output.close();
+    const bool writeSucceeded = WriteAll(tempPath, output.str());
     if (!writeSucceeded) {
         DeleteFileW(tempPath.c_str());
         return false;
@@ -621,7 +698,15 @@ void PopulateAppRuleList() {
     // A combo box keeps the rule selector compact and avoids accidental
     // activation while the user is editing the appearance fields below.
     SendMessageW(g_controls.appRules, CB_RESETCONTENT, 0, 0);
-    for (const auto& rule : g_config.appRules) SendMessageW(g_controls.appRules, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(rule.process.c_str()));
+    for (const auto& rule : g_config.appRules) {
+        // A rule may carry no process name at all, so the selector shows every
+        // matcher the entry holds instead of leaving it blank.
+        std::wstring label = rule.process.empty() ? std::wstring(L"*") : rule.process;
+        if (!rule.className.empty()) label += L" +class=" + rule.className;
+        if (!rule.title.empty()) label += L" +title=" + rule.title;
+        if (!rule.aumid.empty()) label += L" +aumid=" + rule.aumid;
+        SendMessageW(g_controls.appRules, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    }
     if (g_selectedAppRule >= static_cast<int>(g_config.appRules.size())) g_selectedAppRule = -1;
     if (g_selectedAppRule >= 0) {
         SendMessageW(g_controls.appRules, CB_SETCURSEL, g_selectedAppRule, 0);
@@ -1960,6 +2045,34 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
         }
         CoUninitialize();
         return palette.empty() ? 5 : 0;
+    }
+    // Configuration round trip: load config.yaml, write the parsed model back
+    // out through the same writer the Save button uses, and exit. It makes
+    // "did my rule survive a save?" answerable without clicking anything.
+    if (commandLine && wcsstr(commandLine, L"--config-round-trip")) {
+        wchar_t module[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, module, MAX_PATH);
+        std::wstring base = module;
+        const size_t slash = base.find_last_of(L"\\/");
+        base = slash == std::wstring::npos ? std::wstring() : base.substr(0, slash + 1);
+        const std::wstring source = base + L"config.yaml";
+        EditorConfig loaded;
+        if (!LoadConfigFile(loaded, source)) {
+            std::wprintf(L"round trip failed: cannot load %ls\n", source.c_str());
+            CoUninitialize();
+            return 2;
+        }
+        const std::wstring target = base + L"config.roundtrip.yaml";
+        if (!SaveConfigFile(loaded, target)) {
+            std::wprintf(L"round trip failed: cannot write %ls\n", target.c_str());
+            CoUninitialize();
+            return 3;
+        }
+        std::wprintf(L"round trip ok: %ls -> %ls rules=%zu blacklist=%zu classes=%zu\n",
+                     source.c_str(), target.c_str(), loaded.appRules.size(),
+                     loaded.blacklistProcesses.size(), loaded.blacklistClasses.size());
+        CoUninitialize();
+        return 0;
     }
     // ListView itself can be registered by another application component, but
     // its image-list support is only dependable after explicit initialization.
