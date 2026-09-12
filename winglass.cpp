@@ -40,6 +40,77 @@
 
 namespace {
 
+// Every string the resident process can display. Both languages sit side by
+// side so a translation can be compared at a glance, and this table is the one
+// place a new string has to be added. The editor keeps its own table, because
+// the three executables share no code beyond the resource identifiers.
+#define WINGLASS_TEXTS(T) \
+    T(TrayTooltip, L"WinGlass \x5168\x5c40\x78e8\x7802\x73bb\x7483", L"WinGlass - global frosted glass") \
+    T(MenuEditor, L"\x6253\x5f00\x914d\x7f6e\x7f16\x8f91\x5668", L"Open settings editor") \
+    T(MenuConfig, L"\x6253\x5f00\x914d\x7f6e\x6587\x4ef6", L"Open configuration file") \
+    T(MenuReload, L"\x91cd\x65b0\x52a0\x8f7d\x6548\x679c", L"Reload effect") \
+    T(MenuStartupOn, L"\x542f\x7528\x5f00\x673a\x542f\x52a8", L"Enable startup at sign-in") \
+    T(MenuStartupOff, L"\x5173\x95ed\x5f00\x673a\x542f\x52a8", L"Disable startup at sign-in") \
+    T(MenuExit, L"\x9000\x51fa", L"Exit") \
+    T(StartupEnableFailed, L"\x65e0\x6cd5\x542f\x7528\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not enable startup at sign-in. Details were written to winglass.log.") \
+    T(StartupDisableFailed, L"\x65e0\x6cd5\x5173\x95ed\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not disable startup at sign-in. Details were written to winglass.log.")
+
+enum class TextId {
+#define WINGLASS_DECLARE_TEXT(id, zh, en) id,
+    WINGLASS_TEXTS(WINGLASS_DECLARE_TEXT)
+#undef WINGLASS_DECLARE_TEXT
+};
+
+struct TextEntry {
+    const wchar_t* chinese;
+    const wchar_t* english;
+};
+
+const TextEntry kTexts[] = {
+#define WINGLASS_DEFINE_TEXT(id, zh, en) { zh, en },
+    WINGLASS_TEXTS(WINGLASS_DEFINE_TEXT)
+#undef WINGLASS_DEFINE_TEXT
+};
+
+enum class UiLanguage { Chinese, English };
+UiLanguage g_language = UiLanguage::Chinese;
+
+// An explicit tag wins; an empty or unknown one falls back to the Windows
+// display language, so "auto" needs no special case.
+void SelectLanguage(const std::wstring& tag) {
+    if (tag == L"en" || tag == L"en-US" || tag == L"english") { g_language = UiLanguage::English; return; }
+    if (tag == L"zh" || tag == L"zh-CN" || tag == L"chinese") { g_language = UiLanguage::Chinese; return; }
+    g_language = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE) ? UiLanguage::Chinese : UiLanguage::English;
+}
+
+void ResolveUiLanguage(const wchar_t* commandLine) {
+    std::wstring tag;
+    if (commandLine) {
+        const wchar_t* flag = wcsstr(commandLine, L"--lang=");
+        if (flag) {
+            for (flag += 7; *flag && *flag != L' ' && *flag != L'"'; ++flag) tag += *flag;
+        }
+    }
+    SelectLanguage(tag);
+}
+
+const wchar_t* Str(TextId id) {
+    const size_t index = static_cast<size_t>(id);
+    if (index >= std::size(kTexts)) return L"";
+    return g_language == UiLanguage::English ? kTexts[index].english : kTexts[index].chinese;
+}
+
+// Diagnostic: prints the resolved language and every string, English in full
+// and Chinese as a character count, so the table can be checked on a console
+// that cannot display Chinese at all.
+int LanguageSelfTest() {
+    std::wprintf(L"language=%ls strings=%zu\n", g_language == UiLanguage::English ? L"en" : L"zh", std::size(kTexts));
+    for (size_t i = 0; i < std::size(kTexts); ++i) {
+        std::wprintf(L"  [%zu] zh_chars=%zu en=%ls\n", i, wcslen(kTexts[i].chinese), kTexts[i].english);
+    }
+    return 0;
+}
+
 struct Color { uint8_t r = 44, g = 62, b = 88; };
 
 struct Rule {
@@ -891,7 +962,7 @@ NOTIFYICONDATAW MakeTrayIconData() {
     icon.uCallbackMessage = kTrayMessage;
     icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
     if (!icon.hIcon) icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION); // never end up with no icon at all
-    wcscpy_s(icon.szTip, L"WinGlass \x5168\x5c40\x78e8\x7802\x73bb\x7483");
+    wcscpy_s(icon.szTip, Str(TextId::TrayTooltip));
     return icon;
 }
 
@@ -928,14 +999,14 @@ void DestroyTrayIcon() {
 void ShowTrayMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    AppendMenuW(menu, MF_STRING, kTrayEditor, L"\x6253\x5f00\x914d\x7f6e\x7f16\x8f91\x5668");
-    AppendMenuW(menu, MF_STRING, kTrayOpenConfig, L"\x6253\x5f00\x914d\x7f6e\x6587\x4ef6");
-    AppendMenuW(menu, MF_STRING, kTrayReload, L"\x91cd\x65b0\x52a0\x8f7d\x6548\x679c");
+    AppendMenuW(menu, MF_STRING, kTrayEditor, Str(TextId::MenuEditor));
+    AppendMenuW(menu, MF_STRING, kTrayOpenConfig, Str(TextId::MenuConfig));
+    AppendMenuW(menu, MF_STRING, kTrayReload, Str(TextId::MenuReload));
     const bool startupEnabled = StartupEnabledForMenu();
     AppendMenuW(menu, MF_STRING, kTrayStartup,
-                startupEnabled ? L"\x5173\x95ed\x5f00\x673a\x542f\x52a8" : L"\x542f\x7528\x5f00\x673a\x542f\x52a8");
+                startupEnabled ? Str(TextId::MenuStartupOff) : Str(TextId::MenuStartupOn));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayExit, L"\x9000\x51fa");
+    AppendMenuW(menu, MF_STRING, kTrayExit, Str(TextId::MenuExit));
     POINT point{}; GetCursorPos(&point); SetForegroundWindow(hwnd);
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd, nullptr);
     if (command) PostMessageW(hwnd, WM_COMMAND, command, 0);
@@ -977,8 +1048,7 @@ LRESULT CALLBACK TrayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 PersistStartupStateCache(enableStartup);
             } else {
                 MessageBoxW(hwnd,
-                            enableStartup ? L"\x65e0\x6cd5\x542f\x7528\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002"
-                                          : L"\x65e0\x6cd5\x5173\x95ed\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002",
+                            enableStartup ? Str(TextId::StartupEnableFailed) : Str(TextId::StartupDisableFailed),
                             L"WinGlass", MB_OK | MB_ICONERROR);
             }
             return 0;
@@ -1864,6 +1934,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     g_diagnosticsPath = base + L"winglass.log";
     g_startupStatePath = base + L"winglass.startup-state";
     g_configPath = base + L"config.yaml";
+    // Before anything can show a message: an explicit --lang= wins,
+    // otherwise the Windows display language decides.
+    ResolveUiLanguage(commandLine);
     // This is deliberately before config parsing and the desktop check: the
     // elevated helper must remain usable even when the normal process is on a
     // non-interactive desktop or a user has temporarily broken their config.
@@ -1874,6 +1947,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     if (!GetFileAttributesExW(g_configPath.c_str(), GetFileExInfoStandard, &configData)) g_configPath = base + L"config.ini";
     if (!LoadConfig(g_config, g_configPath)) return 2;
     g_configWriteTime = g_config.writeTime;
+    if (wcsstr(commandLine, L"--lang-self-test")) return LanguageSelfTest();
     if (wcsstr(commandLine, L"--self-test")) return SelfTest();
     const bool relaunchAttempt = wcsstr(commandLine, L"--interactive-relaunch") != nullptr;
     if (!CanSeeInteractiveDesktop()) {
