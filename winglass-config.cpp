@@ -36,6 +36,9 @@ struct Appearance {
     double glassOpacity = 0.98;
     double tintOpacity = 0.10;
     int animationMs = 400;
+    // When enabled, a borderless window covering an entire monitor is
+    // temporarily restored so browser full-screen video stays unmodified.
+    bool excludeFullscreen = true;
 };
 
 struct AppRule {
@@ -64,13 +67,13 @@ struct EditorConfig {
 
 enum ControlId {
     IDC_ENABLED = 100,
-    IDC_F_TARGET, IDC_F_GLASS, IDC_F_COLOR, IDC_F_GLASS_OPACITY, IDC_F_TINT, IDC_F_ANIMATION,
-    IDC_U_TARGET, IDC_U_GLASS, IDC_U_COLOR, IDC_U_GLASS_OPACITY, IDC_U_TINT, IDC_U_ANIMATION,
+    IDC_F_TARGET, IDC_F_GLASS, IDC_F_COLOR, IDC_F_GLASS_OPACITY, IDC_F_TINT, IDC_F_ANIMATION, IDC_F_FULLSCREEN,
+    IDC_U_TARGET, IDC_U_GLASS, IDC_U_COLOR, IDC_U_GLASS_OPACITY, IDC_U_TINT, IDC_U_ANIMATION, IDC_U_FULLSCREEN,
     IDC_BLACK_PROCESSES, IDC_BLACK_CLASSES,
     IDC_PICK_PROCESS, IDC_SELECTED_PROCESS, IDC_ADD_PROCESS_BLACKLIST, IDC_ADD_APP_RULE,
     IDC_APP_RULES, IDC_REMOVE_APP_RULE,
-    IDC_APP_F_TARGET, IDC_APP_F_GLASS, IDC_APP_F_COLOR, IDC_APP_F_GLASS_OPACITY, IDC_APP_F_TINT, IDC_APP_F_ANIMATION,
-    IDC_APP_U_TARGET, IDC_APP_U_GLASS, IDC_APP_U_COLOR, IDC_APP_U_GLASS_OPACITY, IDC_APP_U_TINT, IDC_APP_U_ANIMATION,
+    IDC_APP_F_TARGET, IDC_APP_F_GLASS, IDC_APP_F_COLOR, IDC_APP_F_GLASS_OPACITY, IDC_APP_F_TINT, IDC_APP_F_ANIMATION, IDC_APP_F_FULLSCREEN,
+    IDC_APP_U_TARGET, IDC_APP_U_GLASS, IDC_APP_U_COLOR, IDC_APP_U_GLASS_OPACITY, IDC_APP_U_TINT, IDC_APP_U_ANIMATION, IDC_APP_U_FULLSCREEN,
     IDC_SAVE, IDC_RELOAD, IDC_OPEN_FOLDER, IDC_EXIT, IDC_STATUS
 };
 
@@ -82,12 +85,14 @@ struct Controls {
     HWND fGlassOpacity = nullptr;
     HWND fTint = nullptr;
     HWND fAnimation = nullptr;
+    HWND fFullscreen = nullptr;
     HWND uTarget = nullptr;
     HWND uGlass = nullptr;
     HWND uColor = nullptr;
     HWND uGlassOpacity = nullptr;
     HWND uTint = nullptr;
     HWND uAnimation = nullptr;
+    HWND uFullscreen = nullptr;
     HWND blacklistProcesses = nullptr;
     HWND blacklistClasses = nullptr;
     HWND selectedProcess = nullptr;
@@ -102,12 +107,14 @@ struct Controls {
     HWND appFGlassOpacity = nullptr;
     HWND appFTint = nullptr;
     HWND appFAnimation = nullptr;
+    HWND appFFullscreen = nullptr;
     HWND appUTarget = nullptr;
     HWND appUGlass = nullptr;
     HWND appUColor = nullptr;
     HWND appUGlassOpacity = nullptr;
     HWND appUTint = nullptr;
     HWND appUAnimation = nullptr;
+    HWND appUFullscreen = nullptr;
     HWND status = nullptr;
 } g_controls;
 
@@ -283,6 +290,7 @@ void SetAppearanceField(Appearance& appearance, const std::wstring& key, const s
     else if (key == L"glass_opacity") appearance.glassOpacity = ParseDouble(value, appearance.glassOpacity, 0.05, 1.0);
     else if (key == L"tint_opacity" || key == L"tint_strength") appearance.tintOpacity = ParseDouble(value, appearance.tintOpacity, 0.0, 1.0);
     else if (key == L"animation_duration_ms" || key == L"transition_ms") appearance.animationMs = ParseInt(value, appearance.animationMs, 0, 5000);
+    else if (key == L"exclude_fullscreen" || key == L"exclude_fullscreen_video") appearance.excludeFullscreen = ParseBool(value, appearance.excludeFullscreen);
 }
 
 bool LoadYaml(EditorConfig& result, const std::wstring& text) {
@@ -388,6 +396,7 @@ bool LoadIniFallback(EditorConfig& result, const std::wstring& text) {
             else if (key == L"active_tint_strength") result.focused.tintOpacity = ParseDouble(value, result.focused.tintOpacity, 0, 1);
             else if (key == L"inactive_tint_strength") result.unfocused.tintOpacity = ParseDouble(value, result.unfocused.tintOpacity, 0, 1);
             else if (key == L"transition_ms") result.focused.animationMs = result.unfocused.animationMs = ParseInt(value, 400, 0, 5000);
+            else if (key == L"exclude_fullscreen" || key == L"exclude_fullscreen_video") result.focused.excludeFullscreen = result.unfocused.excludeFullscreen = ParseBool(value, true);
         }
     }
     return true;
@@ -419,6 +428,7 @@ std::wstring AppearanceYaml(const Appearance& appearance, const wchar_t* name) {
     out << L"  " << name << L":\n"
         << L"    target_opacity: " << appearance.targetOpacity << L"\n"
         << L"    enable_glass: " << (appearance.glass ? L"true" : L"false") << L"\n"
+        << L"    exclude_fullscreen: " << (appearance.excludeFullscreen ? L"true" : L"false") << L"\n"
         << L"    glass_color: \"" << ColorText(appearance.color) << L"\"\n"
         << L"    glass_opacity: " << appearance.glassOpacity << L"\n"
         << L"    tint_opacity: " << appearance.tintOpacity << L"\n"
@@ -431,6 +441,7 @@ std::wstring AppearanceFieldsYaml(const Appearance& appearance, int spaces) {
     std::wostringstream out;
     out << indent << L"target_opacity: " << appearance.targetOpacity << L"\n"
         << indent << L"enable_glass: " << (appearance.glass ? L"true" : L"false") << L"\n"
+        << indent << L"exclude_fullscreen: " << (appearance.excludeFullscreen ? L"true" : L"false") << L"\n"
         << indent << L"glass_color: \"" << ColorText(appearance.color) << L"\"\n"
         << indent << L"glass_opacity: " << appearance.glassOpacity << L"\n"
         << indent << L"tint_opacity: " << appearance.tintOpacity << L"\n"
@@ -510,13 +521,14 @@ HWND MakeEdit(int id, int x, int y, int width = 100) {
 }
 
 void MakeAppearanceGroup(const wchar_t* title, int baseId, int x, int y) {
-    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 220);
+    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 248);
     MakeLabel(L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", x + 16, y + 32);
     MakeLabel(L"\x542f\x7528\x6bdb\x73bb\x7483", x + 16, y + 62);
     MakeLabel(L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", x + 16, y + 92);
     MakeLabel(L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", x + 16, y + 122);
     MakeLabel(L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", x + 16, y + 152);
     MakeLabel(L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", x + 16, y + 182);
+    MakeLabel(L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", x + 16, y + 212);
 
     HWND target = MakeEdit(baseId, x + 205, y + 29);
     HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 205, y + 59, 22, 22);
@@ -524,23 +536,25 @@ void MakeAppearanceGroup(const wchar_t* title, int baseId, int x, int y) {
     HWND glassOpacity = MakeEdit(baseId + 3, x + 205, y + 119);
     HWND tint = MakeEdit(baseId + 4, x + 205, y + 149);
     HWND animation = MakeEdit(baseId + 5, x + 205, y + 179, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 205, y + 209, 22, 22);
     if (baseId == IDC_F_TARGET) {
         g_controls.fTarget = target; g_controls.fGlass = glass; g_controls.fColor = color;
-        g_controls.fGlassOpacity = glassOpacity; g_controls.fTint = tint; g_controls.fAnimation = animation;
+        g_controls.fGlassOpacity = glassOpacity; g_controls.fTint = tint; g_controls.fAnimation = animation; g_controls.fFullscreen = fullscreen;
     } else {
         g_controls.uTarget = target; g_controls.uGlass = glass; g_controls.uColor = color;
-        g_controls.uGlassOpacity = glassOpacity; g_controls.uTint = tint; g_controls.uAnimation = animation;
+        g_controls.uGlassOpacity = glassOpacity; g_controls.uTint = tint; g_controls.uAnimation = animation; g_controls.uFullscreen = fullscreen;
     }
 }
 
 void MakeAppAppearanceGroup(const wchar_t* title, int baseId, int x, int y, bool focused) {
-    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 220);
+    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 248);
     MakeLabel(L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", x + 16, y + 32);
     MakeLabel(L"\x542f\x7528\x6bdb\x73bb\x7483", x + 16, y + 62);
     MakeLabel(L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", x + 16, y + 92);
     MakeLabel(L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", x + 16, y + 122);
     MakeLabel(L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", x + 16, y + 152);
     MakeLabel(L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", x + 16, y + 182);
+    MakeLabel(L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", x + 16, y + 212);
 
     HWND target = MakeEdit(baseId, x + 205, y + 29);
     HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 205, y + 59, 22, 22);
@@ -548,12 +562,13 @@ void MakeAppAppearanceGroup(const wchar_t* title, int baseId, int x, int y, bool
     HWND glassOpacity = MakeEdit(baseId + 3, x + 205, y + 119);
     HWND tint = MakeEdit(baseId + 4, x + 205, y + 149);
     HWND animation = MakeEdit(baseId + 5, x + 205, y + 179, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 205, y + 209, 22, 22);
     if (focused) {
         g_controls.appFTarget = target; g_controls.appFGlass = glass; g_controls.appFColor = color;
-        g_controls.appFGlassOpacity = glassOpacity; g_controls.appFTint = tint; g_controls.appFAnimation = animation;
+        g_controls.appFGlassOpacity = glassOpacity; g_controls.appFTint = tint; g_controls.appFAnimation = animation; g_controls.appFFullscreen = fullscreen;
     } else {
         g_controls.appUTarget = target; g_controls.appUGlass = glass; g_controls.appUColor = color;
-        g_controls.appUGlassOpacity = glassOpacity; g_controls.appUTint = tint; g_controls.appUAnimation = animation;
+        g_controls.appUGlassOpacity = glassOpacity; g_controls.appUTint = tint; g_controls.appUAnimation = animation; g_controls.appUFullscreen = fullscreen;
     }
 }
 
@@ -569,13 +584,14 @@ void SetControlText(HWND control, const std::wstring& text) {
 }
 
 void PutAppearance(const Appearance& appearance, HWND target, HWND glass, HWND color,
-                   HWND glassOpacity, HWND tint, HWND animation) {
+                   HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
     SetControlText(target, std::to_wstring(appearance.targetOpacity));
     SendMessageW(glass, BM_SETCHECK, appearance.glass ? BST_CHECKED : BST_UNCHECKED, 0);
     SetControlText(color, ColorText(appearance.color));
     SetControlText(glassOpacity, std::to_wstring(appearance.glassOpacity));
     SetControlText(tint, std::to_wstring(appearance.tintOpacity));
     SetControlText(animation, std::to_wstring(appearance.animationMs));
+    SendMessageW(fullscreen, BM_SETCHECK, appearance.excludeFullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 void EnableAppRuleControls(bool enabled) {
@@ -583,6 +599,7 @@ void EnableAppRuleControls(bool enabled) {
         g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor, g_controls.appFGlassOpacity,
         g_controls.appFTint, g_controls.appFAnimation, g_controls.appUTarget, g_controls.appUGlass,
         g_controls.appUColor, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation,
+        g_controls.appFFullscreen, g_controls.appUFullscreen,
         g_controls.removeAppRule
     };
     for (HWND control : controls) if (control) EnableWindow(control, enabled);
@@ -590,9 +607,9 @@ void EnableAppRuleControls(bool enabled) {
 
 void PutAppRule(const AppRule& rule) {
     PutAppearance(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
-                  g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation);
+                  g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen);
     PutAppearance(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
-                  g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation);
+                  g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
 }
 
 void PopulateAppRuleList() {
@@ -608,7 +625,7 @@ void PopulateAppRuleList() {
 
 bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
     const auto read = [&](Appearance& appearance, HWND target, HWND glass, HWND color,
-                          HWND glassOpacity, HWND tint, HWND animation) {
+                          HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
         appearance.targetOpacity = ParseDouble(ControlText(target), appearance.targetOpacity, 0.05, 1.0);
         appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!ParseColor(ControlText(color), appearance.color)) {
@@ -621,12 +638,13 @@ bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
         appearance.glassOpacity = ParseDouble(ControlText(glassOpacity), appearance.glassOpacity, 0.05, 1.0);
         appearance.tintOpacity = ParseDouble(ControlText(tint), appearance.tintOpacity, 0.0, 1.0);
         appearance.animationMs = ParseInt(ControlText(animation), appearance.animationMs, 0, 5000);
+        appearance.excludeFullscreen = SendMessageW(fullscreen, BM_GETCHECK, 0, 0) == BST_CHECKED;
         return true;
     };
     return read(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
-                g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation) &&
+                g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen) &&
            read(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
-                g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation);
+                g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
 }
 
 void CaptureSelectedAppRule(bool showErrors) {
@@ -917,9 +935,9 @@ void OpenProcessPicker() {
 void LoadToControls() {
     SendMessageW(g_controls.enabled, BM_SETCHECK, g_config.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     PutAppearance(g_config.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                  g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation);
+                  g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     PutAppearance(g_config.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                  g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation);
+                  g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
     SetControlText(g_controls.blacklistProcesses, JoinLines(g_config.blacklistProcesses));
     SetControlText(g_controls.blacklistClasses, JoinLines(g_config.blacklistClasses));
     g_selectedAppRule = g_config.appRules.empty() ? -1 : 0;
@@ -938,7 +956,7 @@ std::vector<std::wstring> ReadLines(HWND control) {
 }
 
 bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
-                    HWND glassOpacity, HWND tint, HWND animation) {
+                    HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
     appearance.targetOpacity = ParseDouble(ControlText(target), appearance.targetOpacity, 0.05, 1.0);
     appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ParseColor(ControlText(color), appearance.color)) {
@@ -949,6 +967,7 @@ bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
     appearance.glassOpacity = ParseDouble(ControlText(glassOpacity), appearance.glassOpacity, 0.05, 1.0);
     appearance.tintOpacity = ParseDouble(ControlText(tint), appearance.tintOpacity, 0.0, 1.0);
     appearance.animationMs = ParseInt(ControlText(animation), appearance.animationMs, 0, 5000);
+    appearance.excludeFullscreen = SendMessageW(fullscreen, BM_GETCHECK, 0, 0) == BST_CHECKED;
     return true;
 }
 
@@ -960,9 +979,9 @@ bool SaveFromControls() {
     EditorConfig updated = g_config;
     updated.enabled = SendMessageW(g_controls.enabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ReadAppearance(updated.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                        g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation) ||
+                        g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen) ||
         !ReadAppearance(updated.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                        g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation)) {
+                        g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen)) {
         return false;
     }
     updated.blacklistProcesses = ReadLines(g_controls.blacklistProcesses);
@@ -1016,9 +1035,9 @@ void AddSelectedProcessRule() {
     rule.focused = g_config.focused;
     rule.unfocused = g_config.unfocused;
     ReadAppearance(rule.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                   g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation);
+                   g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     ReadAppearance(rule.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                   g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation);
+                   g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
     g_config.appRules.push_back(std::move(rule));
     g_selectedAppRule = static_cast<int>(g_config.appRules.size() - 1);
     PopulateAppRuleList();
@@ -1068,39 +1087,39 @@ void CreateControls() {
     MakeAppearanceGroup(L"\x805a\x7126\x7a97\x53e3", IDC_F_TARGET, 20, 55);
     MakeAppearanceGroup(L"\x5931\x6d3b\x7a97\x53e3", IDC_U_TARGET, 405, 55);
 
-    MakeControl(L"BUTTON", L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", BS_GROUPBOX, 0, 20, 290, 750, 115);
-    MakeLabel(L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", 35, 318, 90);
-    g_controls.selectedProcess = MakeLabel(L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", 125, 318, 420);
+    MakeControl(L"BUTTON", L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", BS_GROUPBOX, 0, 20, 315, 750, 115);
+    MakeLabel(L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", 35, 343, 90);
+    g_controls.selectedProcess = MakeLabel(L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", 125, 343, 420);
     g_controls.pickProcess = MakeControl(L"BUTTON", L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b...", 0,
-                                         IDC_PICK_PROCESS, 565, 313, 165, 28);
+                                         IDC_PICK_PROCESS, 565, 338, 165, 28);
     g_controls.addProcessBlacklist = MakeControl(L"BUTTON", L"\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x4fdd\x5b58", 0,
-                                                   IDC_ADD_PROCESS_BLACKLIST, 350, 343, 170, 25);
+                                                   IDC_ADD_PROCESS_BLACKLIST, 350, 368, 170, 25);
     g_controls.addAppRule = MakeControl(L"BUTTON", L"\x521b\x5efa\x4e13\x5c5e\x89c4\x5219", 0,
-                                         IDC_ADD_APP_RULE, 530, 343, 130, 25);
-    MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 374, 100);
+                                         IDC_ADD_APP_RULE, 530, 368, 130, 25);
+    MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 399, 100);
     g_controls.appRules = MakeControl(L"LISTBOX", L"", WS_BORDER | LBS_NOTIFY | WS_VSCROLL,
-                                      IDC_APP_RULES, 125, 371, 360, 25);
-    g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0, IDC_REMOVE_APP_RULE, 500, 371, 120, 25);
+                                      IDC_APP_RULES, 125, 396, 360, 25);
+    g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0, IDC_REMOVE_APP_RULE, 500, 396, 120, 25);
     SetSelectedProcess(L"", L"");
 
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", IDC_APP_F_TARGET, 20, 420, true);
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", IDC_APP_U_TARGET, 405, 420, false);
+    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", IDC_APP_F_TARGET, 20, 445, true);
+    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", IDC_APP_U_TARGET, 405, 445, false);
 
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 20, 665, 365, 150);
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 405, 665, 365, 150);
+    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 20, 693, 365, 150);
+    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 405, 693, 365, 150);
     g_controls.blacklistProcesses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                                  IDC_BLACK_PROCESSES, 35, 700, 335, 95);
+                                                  IDC_BLACK_PROCESSES, 35, 728, 335, 95);
     g_controls.blacklistClasses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                                               IDC_BLACK_CLASSES, 420, 700, 335, 95);
+                                               IDC_BLACK_CLASSES, 420, 728, 335, 95);
     SendMessageW(g_controls.blacklistProcesses, EM_SETLIMITTEXT, 8192, 0);
     SendMessageW(g_controls.blacklistClasses, EM_SETLIMITTEXT, 8192, 0);
 
-    MakeLabel(L"\x9ed1\x540d\x5355\x4e0e\x4e13\x5c5e\x89c4\x5219\x4f1a\x5199\x5165 config.yaml\xff0c\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x5e94\x7528\x3002", 24, 830, 740);
-    g_controls.status = MakeLabel(L"", 24, 854, 740);
-    MakeControl(L"BUTTON", L"\x4fdd\x5b58\x5e76\x5e94\x7528", BS_DEFPUSHBUTTON, IDC_SAVE, 410, 885, 150, 30);
-    MakeControl(L"BUTTON", L"\x91cd\x65b0\x52a0\x8f7d", 0, IDC_RELOAD, 570, 885, 90, 30);
-    MakeControl(L"BUTTON", L"\x6253\x5f00\x6587\x4ef6\x5939", 0, IDC_OPEN_FOLDER, 670, 885, 100, 30);
-    MakeControl(L"BUTTON", L"\x5173\x95ed", 0, IDC_EXIT, 300, 885, 90, 30);
+    MakeLabel(L"\x9ed1\x540d\x5355\x4e0e\x4e13\x5c5e\x89c4\x5219\x4f1a\x5199\x5165 config.yaml\xff0c\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x5e94\x7528\x3002", 24, 858, 740);
+    g_controls.status = MakeLabel(L"", 24, 882, 740);
+    MakeControl(L"BUTTON", L"\x4fdd\x5b58\x5e76\x5e94\x7528", BS_DEFPUSHBUTTON, IDC_SAVE, 410, 913, 150, 30);
+    MakeControl(L"BUTTON", L"\x91cd\x65b0\x52a0\x8f7d", 0, IDC_RELOAD, 570, 913, 90, 30);
+    MakeControl(L"BUTTON", L"\x6253\x5f00\x6587\x4ef6\x5939", 0, IDC_OPEN_FOLDER, 670, 913, 100, 30);
+    MakeControl(L"BUTTON", L"\x5173\x95ed", 0, IDC_EXIT, 300, 913, 90, 30);
 }
 
 LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1175,7 +1194,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_window = CreateWindowExW(WS_EX_APPWINDOW, windowClass.lpszClassName,
                                L"WinGlass \x914d\x7f6e\x7f16\x8f91\x5668", WS_OVERLAPPED | WS_CAPTION |
                                WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 810, 970,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 810, 1000,
                                nullptr, nullptr, instance, nullptr);
     if (!g_window) return 3;
     ShowWindow(g_window, showCommand);

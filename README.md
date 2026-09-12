@@ -241,6 +241,8 @@ A few conventions:
 
 `winglass-config.exe` provides a GUI covering the master switch, focused/unfocused opacity, glass on/off, colour, density, animation duration and the blacklist. Saving **atomically replaces** `config.yaml` (temp file first, then replace, so a failure mid-save cannot truncate your configuration), and the running main process hot-reloads automatically.
 
+Focused and unfocused panels also include an “exclude full-screen video” checkbox; clear it when that state should continue applying the effect to a full-screen browser window.
+
 ![WinGlass config editor](docs/editor.png)
 
 The "running processes and per-app rules" section lists currently running processes:
