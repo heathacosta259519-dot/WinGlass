@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <tlhelp32.h>
 #include <wincodec.h>
 
@@ -69,6 +70,9 @@ struct ProcessCandidate {
     std::wstring process;
     std::wstring path;
     DWORD processId = 0;
+    // Store and MSIX applications have no process name of their own: this
+    // carries the package identity the resident process matches instead.
+    std::wstring aumid;
 };
 
 struct EditorConfig {
@@ -161,8 +165,10 @@ std::vector<ProcessCandidate> g_processCandidates;
 int g_selectedAppRule = -1;
 std::wstring g_selectedProcess;
 std::wstring g_selectedProcessDisplay;
+std::wstring g_selectedAumid;
 std::wstring g_pickerChosenProcess;
 std::wstring g_pickerChosenDisplay;
+std::wstring g_pickerChosenAumid;
 
 static constexpr int IDC_PICKER_LIST = 300;
 static constexpr int IDC_PICKER_TABS = 301;
@@ -176,10 +182,11 @@ HWND g_pickerOpen = nullptr;
 HIMAGELIST g_pickerImages = nullptr;
 std::vector<ProcessCandidate> g_pickerCandidates;
 
-// The three pages mirror familiar process explorers: applications are the
-// visible desktop programs, processes are the complete process snapshot, and
-// windows exposes each individual visible top-level window.
-enum class PickerPage { Applications, Processes, Windows };
+// The pages mirror familiar process explorers: applications are the visible
+// desktop programs, processes are the complete process snapshot, windows
+// exposes each individual visible top-level window, and packages lists the
+// installed Store applications by package identity.
+enum class PickerPage { Applications, Processes, Windows, Packages };
 PickerPage g_pickerPage = PickerPage::Applications;
 
 // The live process picker updates the status line before the UI helper's
@@ -880,6 +887,94 @@ BOOL CALLBACK VisibleWindowPickerProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
+// Store and MSIX applications are launched by package identity rather than by
+// executable name: to the process snapshot every one of them is the shared
+// ApplicationFrameHost.exe. The shell's AppsFolder namespace is the list of
+// launchable entries, and every item there carries both the name a person
+// recognises and the identity the resident process compares against.
+// PKEY_AppUserModel_ID, spelled out here to keep the editor free of a propsys
+// dependency that its one property read does not justify.
+const PROPERTYKEY kPackageIdentityKey = {
+    { 0x9F4C2855, 0x9F79, 0x4B39, { 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3 } }, 5 };
+
+// Set by the --list-packages diagnostic, which reports how far the shell
+// enumeration got when it finds nothing.
+bool g_reportPackageSteps = false;
+
+void ReportPackageStep(const wchar_t* step, HRESULT result) {
+    if (g_reportPackageSteps) std::wprintf(L"  %ls: hr=0x%08lX\n", step, static_cast<unsigned long>(result));
+}
+
+void EnumeratePackageCandidates() {
+    PIDLIST_ABSOLUTE folder = nullptr;
+    const HRESULT folderResult = SHGetKnownFolderIDList(FOLDERID_AppsFolder, 0, nullptr, &folder);
+    ReportPackageStep(L"SHGetKnownFolderIDList", folderResult);
+    if (FAILED(folderResult) || !folder) return;
+    // SHBindToParent hands back the parent folder (the desktop) together with
+    // the AppsFolder pidl, so the namespace itself still has to be bound to:
+    // enumerating the parent would list desktop icons instead.
+    IShellFolder* desktop = nullptr;
+    PCUITEMID_CHILD child = nullptr;
+    const HRESULT bindResult = SHBindToParent(folder, __uuidof(IShellFolder), reinterpret_cast<void**>(&desktop), &child);
+    ReportPackageStep(L"SHBindToParent", bindResult);
+    if (FAILED(bindResult) || !desktop) {
+        CoTaskMemFree(folder);
+        return;
+    }
+    IShellFolder* apps = nullptr;
+    const HRESULT folderBindResult = desktop->BindToObject(child, nullptr, __uuidof(IShellFolder),
+                                                           reinterpret_cast<void**>(&apps));
+    ReportPackageStep(L"BindToObject", folderBindResult);
+    desktop->Release();
+    if (FAILED(folderBindResult) || !apps) {
+        CoTaskMemFree(folder);
+        return;
+    }
+    IEnumIDList* ids = nullptr;
+    // Every entry in this namespace is a folder as far as the shell is
+    // concerned, so asking for files alone returns nothing at all.
+    const HRESULT enumResult = apps->EnumObjects(nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, &ids);
+    ReportPackageStep(L"EnumObjects", enumResult);
+    size_t seen = 0;
+    size_t identified = 0;
+    if (SUCCEEDED(enumResult) && ids) {
+        LPITEMIDLIST childPidl = nullptr;
+        while (ids->Next(1, &childPidl, nullptr) == S_OK) {
+            ++seen;
+            IShellItem2* item = nullptr;
+            if (SUCCEEDED(SHCreateItemWithParent(folder, apps, childPidl, __uuidof(IShellItem2),
+                                                 reinterpret_cast<void**>(&item))) && item) {
+                PWSTR identity = nullptr;
+                if (SUCCEEDED(item->GetString(kPackageIdentityKey, &identity)) && identity) {
+                    ++identified;
+                    const std::wstring aumid(identity);
+                    CoTaskMemFree(identity);
+                    // A package identity qualifies its application after the
+                    // "!" separator; the plain desktop entries that share this
+                    // namespace already appear on the process pages.
+                    if (aumid.find(L'!') != std::wstring::npos) {
+                        PWSTR name = nullptr;
+                        item->GetDisplayName(SIGDN_NORMALDISPLAY, &name);
+                        ProcessCandidate candidate{};
+                        candidate.aumid = aumid;
+                        candidate.display = name ? std::wstring(name) + L"   " + aumid : aumid;
+                        if (name) CoTaskMemFree(name);
+                        g_pickerCandidates.push_back(std::move(candidate));
+                    }
+                }
+                item->Release();
+            }
+            CoTaskMemFree(childPidl);
+        }
+        ids->Release();
+    }
+    if (g_reportPackageSteps) {
+        std::wprintf(L"  items=%zu with_identity=%zu packaged=%zu\n", seen, identified, g_pickerCandidates.size());
+    }
+    apps->Release();
+    CoTaskMemFree(folder);
+}
+
 void BuildPickerCandidates() {
     g_pickerCandidates.clear();
     switch (g_pickerPage) {
@@ -891,6 +986,9 @@ void BuildPickerCandidates() {
         break;
     case PickerPage::Windows:
         EnumWindows(&VisibleWindowPickerProc, 0);
+        break;
+    case PickerPage::Packages:
+        EnumeratePackageCandidates();
         break;
     }
     std::sort(g_pickerCandidates.begin(), g_pickerCandidates.end(), [](const ProcessCandidate& left, const ProcessCandidate& right) {
@@ -935,20 +1033,32 @@ bool ConfirmPickerSelection() {
     if (!ListView_GetItem(g_pickerList, &item) || item.lParam < 0 ||
         item.lParam >= static_cast<LPARAM>(g_pickerCandidates.size())) return false;
     const auto& candidate = g_pickerCandidates[static_cast<size_t>(item.lParam)];
-    g_pickerChosenProcess = candidate.process;
-    g_pickerChosenDisplay = candidate.process + L"  [PID " + std::to_wstring(candidate.processId) + L"]";
+    if (!candidate.aumid.empty()) {
+        // A Store application has no process name to offer, so its package
+        // identity is the only stable handle to hand back.
+        g_pickerChosenProcess.clear();
+        g_pickerChosenAumid = candidate.aumid;
+        g_pickerChosenDisplay = candidate.display;
+    } else {
+        g_pickerChosenAumid.clear();
+        g_pickerChosenProcess = candidate.process;
+        g_pickerChosenDisplay = candidate.process + L"  [PID " + std::to_wstring(candidate.processId) + L"]";
+    }
     DestroyWindow(g_pickerWindow);
     return true;
 }
 
-void SetSelectedProcess(const std::wstring& process, const std::wstring& display) {
+void SetSelectedProcess(const std::wstring& process, const std::wstring& display, const std::wstring& aumid = L"") {
     g_selectedProcess = process;
+    g_selectedAumid = aumid;
     g_selectedProcessDisplay = display;
-    const bool hasSelection = !g_selectedProcess.empty();
+    const bool hasSelection = !g_selectedProcess.empty() || !g_selectedAumid.empty();
     if (g_controls.selectedProcess) {
         SetControlText(g_controls.selectedProcess, hasSelection ? g_selectedProcessDisplay : L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b");
     }
-    if (g_controls.addProcessBlacklist) EnableWindow(g_controls.addProcessBlacklist, hasSelection);
+    // The blacklist matches on process and window class, and a package identity
+    // has neither, so only the per-application rule path can use it.
+    if (g_controls.addProcessBlacklist) EnableWindow(g_controls.addProcessBlacklist, !g_selectedProcess.empty());
     if (g_controls.addAppRule) EnableWindow(g_controls.addAppRule, hasSelection);
 }
 
@@ -969,7 +1079,7 @@ LRESULT CALLBACK ProcessPickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         g_pickerTabs = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             10, 8, 580, 29, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PICKER_TABS)), g_instance, nullptr);
         if (g_pickerTabs && g_font) SendMessageW(g_pickerTabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
-        const wchar_t* pages[] = { L"\x5e94\x7528\x7a0b\x5e8f", L"\x8fdb\x7a0b", L"\x7a97\x53e3" };
+        const wchar_t* pages[] = { L"\x5e94\x7528\x7a0b\x5e8f", L"\x8fdb\x7a0b", L"\x7a97\x53e3", L"\x5546\x5e97\x5e94\x7528" };
         for (int index = 0; index < static_cast<int>(std::size(pages)); ++index) {
             TCITEMW page{};
             page.mask = TCIF_TEXT;
@@ -1007,7 +1117,8 @@ LRESULT CALLBACK ProcessPickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (notify && notify->idFrom == IDC_PICKER_TABS && notify->code == TCN_SELCHANGE) {
             const int selectedPage = TabCtrl_GetCurSel(g_pickerTabs);
             g_pickerPage = selectedPage == 1 ? PickerPage::Processes :
-                           selectedPage == 2 ? PickerPage::Windows : PickerPage::Applications;
+                           selectedPage == 2 ? PickerPage::Windows :
+                           selectedPage == 3 ? PickerPage::Packages : PickerPage::Applications;
             RebuildPickerList();
             return 0;
         }
@@ -1058,6 +1169,7 @@ void OpenProcessPicker() {
     EnumerateProcessCandidates();
     g_pickerChosenProcess.clear();
     g_pickerChosenDisplay.clear();
+    g_pickerChosenAumid.clear();
     HWND picker = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WinGlassProcessPicker", L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b",
         WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 610, 605,
         g_window, nullptr, g_instance, nullptr);
@@ -1073,8 +1185,8 @@ void OpenProcessPicker() {
     }
     EnableWindow(g_window, TRUE);
     SetForegroundWindow(g_window);
-    if (!g_pickerChosenProcess.empty()) {
-        SetSelectedProcess(g_pickerChosenProcess, g_pickerChosenDisplay);
+    if (!g_pickerChosenProcess.empty() || !g_pickerChosenAumid.empty()) {
+        SetSelectedProcess(g_pickerChosenProcess, g_pickerChosenDisplay, g_pickerChosenAumid);
         SetStatus(L"\x5df2\x9009\x62e9 " + g_pickerChosenDisplay + L"\x3002");
     }
 }
@@ -1911,7 +2023,11 @@ bool SaveFromControls() {
 void AddSelectedProcessToBlacklist() {
     const std::wstring process = g_selectedProcess;
     if (process.empty()) {
-        SetStatus(L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002");
+        // A package identity cannot join the name blacklist: those windows
+        // belong to the shared ApplicationFrameHost.exe host, so the only way
+        // to exempt one is a rule that matches its package identity.
+        SetStatus(g_selectedAumid.empty() ? L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002"
+                                          : L"\x5546\x5e97\x5e94\x7528\x8bf7\x7528\x4e13\x5c5e\x89c4\x5219\x6309\x5305\x6807\x8bc6\x5339\x914d\x3002");
         return;
     }
     // Incorporate any manual edits in the blacklist box before adding the
@@ -1924,16 +2040,23 @@ void AddSelectedProcessToBlacklist() {
 
 void AddSelectedProcessRule() {
     const std::wstring process = g_selectedProcess;
-    if (process.empty()) {
+    const std::wstring aumid = g_selectedAumid;
+    if (process.empty() && aumid.empty()) {
         SetStatus(L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002");
         return;
     }
+    // A Store application is identified by its package identity; a desktop
+    // program by its executable name. Whichever was picked names the rule in
+    // the status line.
+    const std::wstring identity = process.empty() ? aumid : process;
     CaptureSelectedAppRule(false);
     for (size_t i = 0; i < g_config.appRules.size(); ++i) {
-        if (_wcsicmp(g_config.appRules[i].process.c_str(), process.c_str()) == 0) {
+        const AppRule& existing = g_config.appRules[i];
+        if (_wcsicmp(existing.process.c_str(), process.c_str()) == 0 &&
+            _wcsicmp(existing.aumid.c_str(), aumid.c_str()) == 0) {
             g_selectedAppRule = static_cast<int>(i);
             PopulateAppRuleList();
-            SetStatus(process + L" \x5df2\x5b58\x5728\x4e13\x5c5e\x89c4\x5219\x3002");
+            SetStatus(identity + L" \x5df2\x5b58\x5728\x4e13\x5c5e\x89c4\x5219\x3002");
             return;
         }
     }
@@ -1941,6 +2064,7 @@ void AddSelectedProcessRule() {
     // rule feels like a focused override rather than a blank form.
     AppRule rule{};
     rule.process = process;
+    rule.aumid = aumid;
     rule.focused = g_config.focused;
     rule.unfocused = g_config.unfocused;
     ReadAppearance(rule.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
@@ -1950,7 +2074,7 @@ void AddSelectedProcessRule() {
     g_config.appRules.push_back(std::move(rule));
     g_selectedAppRule = static_cast<int>(g_config.appRules.size() - 1);
     PopulateAppRuleList();
-    if (SaveFromControls()) SetStatus(process + L" \x5df2\x521b\x5efa\x4e13\x5c5e\x89c4\x5219\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002");
+    if (SaveFromControls()) SetStatus(identity + L" \x5df2\x521b\x5efa\x4e13\x5c5e\x89c4\x5219\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002");
 }
 
 void RemoveSelectedAppRule() {
@@ -2157,6 +2281,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
         }
         CoUninitialize();
         return palette.empty() ? 5 : 0;
+    }
+    // Package diagnostic: print every Store application identity the picker
+    // can offer, so the enumeration can be checked without opening the dialog.
+    if (commandLine && wcsstr(commandLine, L"--list-packages")) {
+        g_pickerCandidates.clear();
+        g_reportPackageSteps = true;
+        EnumeratePackageCandidates();
+        std::sort(g_pickerCandidates.begin(), g_pickerCandidates.end(),
+                  [](const ProcessCandidate& left, const ProcessCandidate& right) { return left.display < right.display; });
+        for (const auto& package : g_pickerCandidates) std::wprintf(L"%ls\n", package.display.c_str());
+        std::wprintf(L"packages=%zu\n", g_pickerCandidates.size());
+        const bool found = !g_pickerCandidates.empty();
+        CoUninitialize();
+        return found ? 0 : 6;
     }
     // Configuration round trip: load config.yaml, write the parsed model back
     // out through the same writer the Save button uses, and exit. It makes
