@@ -250,12 +250,27 @@ The "running processes and per-app rules" section lists currently running proces
 - **Add to blacklist and save in one click** — matched permanently by `program.exe`, independent of the current PID;
 - **Create a per-app rule** — starts from the current global appearance and configures focused and unfocused states for that program separately.
 
+### Extract wallpaper colours from the clipboard (experimental)
+
+The "extract palette from clipboard" button in the editor header reads an image from the clipboard and reports the ten most frequent colours. This also covers live-wallpaper software, because whatever it draws ends up in the screenshot:
+
+1. Take a screenshot of the **bare desktop** (no icons) with any screenshot tool and copy it to the clipboard;
+2. Open the editor and click the palette button;
+3. The panel shows a preview, the image size and sampling statistics, followed by ten swatches with their hex value and share of the image;
+4. Select a swatch, then pick a target:
+   - **Apply to global** — writes the global focused and unfocused tint colour;
+   - **Apply to every rule (including per-app)** — overwrites the global colour and every per-app rule, after a confirmation prompt;
+5. Colours are only written into the editor fields; nothing reaches `config.yaml` until you press "save and apply", and "reload" discards the change.
+
+Both `CF_DIBV5` / `CF_DIB` (what nearly every screenshot tool publishes) and a clipboard that only offers the registered `PNG` format are supported, at 8/16/24/32 bpp. To check what a given screenshot produces, run `winglass-config.exe --palette-self-test`.
+
 ## Command-line arguments
 
 | Argument | Purpose |
 |---|---|
 | *(none)* | Run as a resident process |
 | `--self-test` | Parse the configuration and verify the system accepts the glass composition strategy (exit codes: `0` success / `2` config read failure / `3` composition unavailable) |
+| `--palette-self-test` | Config editor only: decode the clipboard image and print the extracted palette, to diagnose screenshot/colour problems |
 | `--interactive-relaunch` | Internal: second launch marker after handing over from an isolated desktop to the user desktop |
 | `--set-startup=enable\|disable` | Internal: helper mode that only writes the registry autostart entry when elevation is required in a restricted environment |
 

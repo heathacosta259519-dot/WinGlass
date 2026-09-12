@@ -7,10 +7,15 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <wincodec.h>
 
 #include "winglass-resource.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <fstream>
 #include <sstream>
@@ -979,6 +984,759 @@ void SetStatus(const std::wstring& text) {
     SetControlText(g_controls.status, text);
 }
 
+// ---------------------------------------------------------------------------
+// Experimental clipboard palette
+//
+// The user takes a screenshot of the bare desktop with any screenshot tool and
+// copies it to the clipboard. This dialog decodes that image, extracts the most
+// frequent colours and can write one of them into the tint fields. It never
+// talks to the resident process and never writes config.yaml by itself: the
+// regular "save and apply" button stays in charge of persisting anything.
+// ---------------------------------------------------------------------------
+
+constexpr int kPaletteSwatchCount = 10;
+
+// The editor buttons and the dialog buttons live in different windows, so the
+// numeric ranges only have to stay readable rather than globally unique.
+enum PaletteControlId {
+    IDC_PALETTE_OPEN = 200,
+    IDC_PALETTE_INFO = 400,
+    IDC_PALETTE_READ = 401,
+    IDC_PALETTE_APPLY_GLOBAL = 402,
+    IDC_PALETTE_APPLY_ALL = 403,
+    IDC_PALETTE_CLOSE = 404,
+    IDC_PALETTE_STATUS = 405,
+    IDC_PALETTE_SWATCH_BASE = 420
+};
+
+constexpr int kPaletteClientWidth = 660;
+constexpr int kPaletteClientHeight = 460;
+constexpr int kPalettePreviewLeft = 24;
+constexpr int kPalettePreviewTop = 46;
+constexpr int kPalettePreviewWidth = 288;
+constexpr int kPalettePreviewHeight = 162;
+constexpr DWORD kDibAlphaBitfields = 6;  // BI_ALPHABITFIELDS
+
+struct ClipboardBitmap {
+    std::vector<uint8_t> pixels;  // BGRA8, top-down, row-major
+    int width = 0;
+    int height = 0;
+};
+
+struct PaletteEntry {
+    Color color{};
+    double ratio = 0.0;
+};
+
+HWND g_paletteWindow = nullptr;
+HWND g_paletteInfo = nullptr;
+HWND g_paletteStatus = nullptr;
+HWND g_paletteSwatches[kPaletteSwatchCount]{};
+ClipboardBitmap g_paletteBitmap;
+std::vector<PaletteEntry> g_paletteEntries;
+int g_paletteSelected = -1;
+uint64_t g_paletteSampleCount = 0;
+std::wstring g_paletteSourceDescription;
+
+// --- clipboard access ------------------------------------------------------
+
+bool OpenClipboardWithRetry(HWND owner) {
+    // A screenshot tool may still hold the clipboard for a few milliseconds
+    // after copying, so retry briefly instead of reporting a hard failure.
+    for (int attempt = 0; attempt < 12; ++attempt) {
+        if (OpenClipboard(owner)) return true;
+        Sleep(30);
+    }
+    return false;
+}
+
+bool CopyClipboardFormat(HWND owner, UINT format, std::vector<uint8_t>& bytes) {
+    if (!format || !IsClipboardFormatAvailable(format)) return false;
+    if (!OpenClipboardWithRetry(owner)) return false;
+    bool copied = false;
+    if (HANDLE handle = GetClipboardData(format)) {
+        if (const void* data = GlobalLock(handle)) {
+            const SIZE_T size = GlobalSize(handle);
+            if (size > 0) {
+                const auto* begin = static_cast<const uint8_t*>(data);
+                bytes.assign(begin, begin + size);
+                copied = true;
+            }
+            GlobalUnlock(handle);
+        }
+    }
+    CloseClipboard();
+    return copied;
+}
+
+uint32_t ReadUint32(const uint8_t* data) {
+    uint32_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+uint8_t ExtractMaskedChannel(uint32_t pixel, uint32_t mask) {
+    if (mask == 0) return 0;
+    int shift = 0;
+    while (shift < 32 && ((mask >> shift) & 1u) == 0) ++shift;
+    const uint32_t ceiling = mask >> shift;
+    if (ceiling == 0) return 0;
+    const uint64_t value = (pixel & mask) >> shift;
+    return static_cast<uint8_t>((value * 255u + ceiling / 2u) / ceiling);
+}
+
+// Decodes a clipboard device independent bitmap (CF_DIB / CF_DIBV5) into a
+// BGRA8 buffer. Screenshot tools overwhelmingly use 32 bpp BI_RGB, but 24 bpp,
+// 16 bpp and 8 bpp palettes are handled as well so older tools keep working.
+bool DecodeDib(const uint8_t* data, size_t size, ClipboardBitmap& out, std::wstring& error) {
+    const wchar_t* kInvalid = L"\x526a\x8d34\x677f\x56fe\x7247\x6570\x636e\x4e0d\x5b8c\x6574\x6216\x5df2\x635f\x574f\x3002";
+    const wchar_t* kUnsupported = L"\x526a\x8d34\x677f\x56fe\x7247\x7684\x4f4d\x6df1\x4e0d\x53d7\x652f\x6301\x3002";
+    if (size < sizeof(BITMAPINFOHEADER)) { error = kInvalid; return false; }
+    const auto* header = reinterpret_cast<const BITMAPINFOHEADER*>(data);
+    if (header->biSize < sizeof(BITMAPINFOHEADER) || header->biSize > size) { error = kInvalid; return false; }
+    if (header->biWidth <= 0 || header->biHeight == 0 || header->biPlanes != 1) { error = kInvalid; return false; }
+
+    const int width = static_cast<int>(header->biWidth);
+    const int height = std::abs(static_cast<int>(header->biHeight));
+    const bool topDown = header->biHeight < 0;
+    const WORD bitCount = header->biBitCount;
+    const DWORD compression = header->biCompression;
+
+    uint32_t redMask = 0;
+    uint32_t greenMask = 0;
+    uint32_t blueMask = 0;
+    uint32_t alphaMask = 0;
+    size_t pixelOffset = header->biSize;
+
+    if (header->biSize >= sizeof(BITMAPV4HEADER)) {
+        // BITMAPV4HEADER and BITMAPV5HEADER carry the channel masks inline.
+        const auto* v4 = reinterpret_cast<const BITMAPV4HEADER*>(data);
+        redMask = v4->bV4RedMask;
+        greenMask = v4->bV4GreenMask;
+        blueMask = v4->bV4BlueMask;
+        alphaMask = v4->bV4AlphaMask;
+    } else if (compression == BI_BITFIELDS || compression == kDibAlphaBitfields) {
+        const size_t maskBytes = compression == kDibAlphaBitfields ? 16 : 12;
+        if (header->biSize + maskBytes > size) { error = kInvalid; return false; }
+        redMask = ReadUint32(data + header->biSize);
+        greenMask = ReadUint32(data + header->biSize + 4);
+        blueMask = ReadUint32(data + header->biSize + 8);
+        if (maskBytes == 16) alphaMask = ReadUint32(data + header->biSize + 12);
+        pixelOffset = header->biSize + maskBytes;
+    }
+
+    if (redMask == 0 && greenMask == 0 && blueMask == 0) {
+        if (bitCount == 32 || bitCount == 24) {
+            redMask = 0x00ff0000u; greenMask = 0x0000ff00u; blueMask = 0x000000ffu;
+        } else if (bitCount == 16) {
+            redMask = 0x7c00u; greenMask = 0x03e0u; blueMask = 0x001fu;
+        }
+    }
+
+    size_t paletteEntries = 0;
+    const uint8_t* palette = nullptr;
+    if (bitCount <= 8) {
+        paletteEntries = header->biClrUsed ? header->biClrUsed : (size_t{1} << bitCount);
+        if (pixelOffset + paletteEntries * 4 > size) { error = kInvalid; return false; }
+        palette = data + pixelOffset;
+        pixelOffset += paletteEntries * 4;
+    }
+
+    if (bitCount != 32 && bitCount != 24 && bitCount != 16 && bitCount != 8) { error = kUnsupported; return false; }
+
+    const size_t stride = ((static_cast<size_t>(width) * bitCount + 31) / 32) * 4;
+    const size_t pixelsSize = stride * static_cast<size_t>(height);
+
+    // BITMAPV4/V5 headers keep the channel masks inline, but the .NET bitmap
+    // encoder (and a few other producers) writes the same masks a second time
+    // directly after the header while still declaring BI_BITFIELDS. When those
+    // bytes match the header masks exactly, skip them; otherwise they would be
+    // decoded as the first three pixels and shift the whole image.
+    if (header->biSize >= sizeof(BITMAPV4HEADER) &&
+        (compression == BI_BITFIELDS || compression == kDibAlphaBitfields)) {
+        const size_t extra = compression == kDibAlphaBitfields ? 16 : 12;
+        if (pixelOffset + extra + pixelsSize <= size &&
+            ReadUint32(data + pixelOffset) == redMask &&
+            ReadUint32(data + pixelOffset + 4) == greenMask &&
+            ReadUint32(data + pixelOffset + 8) == blueMask) {
+            pixelOffset += extra;
+        }
+    }
+
+    if (pixelOffset + pixelsSize > size) { error = kInvalid; return false; }
+
+    // Screenshot tools routinely leave an unused alpha channel at zero. Only
+    // trust alpha when the header declares a real alpha mask, otherwise the
+    // whole image would be treated as fully transparent.
+    const bool honouredAlpha = alphaMask != 0;
+    out.width = width;
+    out.height = height;
+    out.pixels.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+    for (int y = 0; y < height; ++y) {
+        const int sourceRow = topDown ? y : height - 1 - y;
+        const uint8_t* row = data + pixelOffset + stride * static_cast<size_t>(sourceRow);
+        uint8_t* destination = out.pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4;
+        for (int x = 0; x < width; ++x) {
+            uint8_t blue = 0, green = 0, red = 0, alpha = 255;
+            if (bitCount == 24) {
+                blue = row[x * 3];
+                green = row[x * 3 + 1];
+                red = row[x * 3 + 2];
+            } else if (bitCount == 8) {
+                const uint8_t index = row[x];
+                if (index < paletteEntries) {
+                    blue = palette[index * 4];
+                    green = palette[index * 4 + 1];
+                    red = palette[index * 4 + 2];
+                }
+            } else if (bitCount == 16) {
+                uint16_t value = 0;
+                std::memcpy(&value, row + static_cast<size_t>(x) * 2, sizeof(value));
+                red = ExtractMaskedChannel(value, redMask);
+                green = ExtractMaskedChannel(value, greenMask);
+                blue = ExtractMaskedChannel(value, blueMask);
+            } else {
+                const uint32_t value = ReadUint32(row + static_cast<size_t>(x) * 4);
+                red = ExtractMaskedChannel(value, redMask);
+                green = ExtractMaskedChannel(value, greenMask);
+                blue = ExtractMaskedChannel(value, blueMask);
+                if (honouredAlpha) alpha = ExtractMaskedChannel(value, alphaMask);
+            }
+            uint8_t* pixel = destination + static_cast<size_t>(x) * 4;
+            pixel[0] = blue;
+            pixel[1] = green;
+            pixel[2] = red;
+            pixel[3] = alpha;
+        }
+    }
+    return true;
+}
+
+// Screenshot tools that only publish the PNG clipboard format (registered as
+// "PNG") need the Windows Imaging Component to be decoded.
+bool DecodePng(const uint8_t* data, size_t size, ClipboardBitmap& out, std::wstring& error) {
+    IWICImagingFactory* factory = nullptr;
+    HRESULT result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                     IID_PPV_ARGS(&factory));
+    if (FAILED(result) || !factory) {
+        error = L"\x65e0\x6cd5\x521d\x59cb\x5316\x56fe\x7247\x89e3\x7801\x5668\xff0cPNG \x683c\x5f0f\x4e0d\x53ef\x7528\x3002";
+        return false;
+    }
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    bool decoded = false;
+    do {
+        if (FAILED(factory->CreateStream(&stream)) || !stream) break;
+        if (FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(data), static_cast<DWORD>(size)))) break;
+        if (FAILED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) || !decoder) break;
+        if (FAILED(decoder->GetFrame(0, &frame)) || !frame) break;
+        if (FAILED(factory->CreateFormatConverter(&converter)) || !converter) break;
+        if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone,
+                                        nullptr, 0.0, WICBitmapPaletteTypeCustom))) break;
+        UINT width = 0;
+        UINT height = 0;
+        if (FAILED(converter->GetSize(&width, &height)) || width == 0 || height == 0) break;
+        out.width = static_cast<int>(width);
+        out.height = static_cast<int>(height);
+        out.pixels.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
+        if (FAILED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(out.pixels.size()), out.pixels.data()))) {
+            out.pixels.clear();
+            break;
+        }
+        decoded = true;
+    } while (false);
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    factory->Release();
+    if (!decoded && error.empty()) error = L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002";
+    return decoded;
+}
+
+bool ReadClipboardImage(HWND owner, ClipboardBitmap& out, std::wstring& error) {
+    const UINT pngFormat = RegisterClipboardFormatW(L"PNG");
+    const bool dibAvailable = IsClipboardFormatAvailable(CF_DIBV5) || IsClipboardFormatAvailable(CF_DIB);
+    const bool pngAvailable = pngFormat && IsClipboardFormatAvailable(pngFormat);
+    std::vector<uint8_t> bytes;
+    std::wstring decodeError;
+    // Kept for diagnostics: knowing which clipboard flavour was decoded makes
+    // odd palettes much easier to explain.
+    const auto describe = [](const wchar_t* format, const std::vector<uint8_t>& buffer) {
+        if (buffer.size() < sizeof(BITMAPINFOHEADER)) return std::wstring(format);
+        const auto* header = reinterpret_cast<const BITMAPINFOHEADER*>(buffer.data());
+        wchar_t text[160]{};
+        swprintf_s(text, L"%s header=%u bits=%u compression=%u clrUsed=%u", format,
+                   header->biSize, header->biBitCount, header->biCompression, header->biClrUsed);
+        return std::wstring(text);
+    };
+    if (dibAvailable && CopyClipboardFormat(owner, CF_DIBV5, bytes)) {
+        g_paletteSourceDescription = describe(L"CF_DIBV5", bytes);
+        if (DecodeDib(bytes.data(), bytes.size(), out, decodeError)) return true;
+    }
+    if (dibAvailable && CopyClipboardFormat(owner, CF_DIB, bytes)) {
+        g_paletteSourceDescription = describe(L"CF_DIB", bytes);
+        if (DecodeDib(bytes.data(), bytes.size(), out, decodeError)) return true;
+    }
+    if (pngAvailable && CopyClipboardFormat(owner, pngFormat, bytes)) {
+        g_paletteSourceDescription = L"PNG";
+        if (DecodePng(bytes.data(), bytes.size(), out, decodeError)) return true;
+    }
+    if (!dibAvailable && !pngAvailable) {
+        error = L"\x526a\x8d34\x677f\x91cc\x6ca1\x6709\x56fe\x7247\x3002\x8bf7\x5148\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\x3002";
+        return false;
+    }
+    error = decodeError.empty() ? L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002" : decodeError;
+    return false;
+}
+
+// --- colour analysis -------------------------------------------------------
+
+// Reduces the bitmap to the most frequent colours. A coarse 5 bit histogram is
+// built first, then neighbouring buckets are merged into clusters so gradients
+// produce distinct colours instead of ten near-identical ones.
+std::vector<PaletteEntry> ExtractPalette(const ClipboardBitmap& bitmap, int wanted, uint64_t& sampled) {
+    std::vector<PaletteEntry> entries;
+    sampled = 0;
+    if (bitmap.width <= 0 || bitmap.height <= 0 || bitmap.pixels.empty()) return entries;
+
+    const int stepX = std::max(1, bitmap.width / 240);
+    const int stepY = std::max(1, bitmap.height / 240);
+    struct Bucket {
+        uint64_t count = 0;
+        uint64_t red = 0;
+        uint64_t green = 0;
+        uint64_t blue = 0;
+    };
+    std::vector<Bucket> buckets(32768);
+    for (int y = 0; y < bitmap.height; y += stepY) {
+        const uint8_t* row = bitmap.pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(bitmap.width) * 4;
+        for (int x = 0; x < bitmap.width; x += stepX) {
+            const uint8_t* pixel = row + static_cast<size_t>(x) * 4;
+            if (pixel[3] < 16) continue;  // fully transparent pixels are not wallpaper
+            Bucket& bucket = buckets[((pixel[2] >> 3) << 10) | ((pixel[1] >> 3) << 5) | (pixel[0] >> 3)];
+            ++bucket.count;
+            bucket.red += pixel[2];
+            bucket.green += pixel[1];
+            bucket.blue += pixel[0];
+            ++sampled;
+        }
+    }
+    if (sampled == 0) return entries;
+
+    std::vector<int> order;
+    order.reserve(buckets.size());
+    for (size_t index = 0; index < buckets.size(); ++index) {
+        if (buckets[index].count) order.push_back(static_cast<int>(index));
+    }
+    std::sort(order.begin(), order.end(), [&buckets](int left, int right) {
+        return buckets[static_cast<size_t>(left)].count > buckets[static_cast<size_t>(right)].count;
+    });
+
+    struct Cluster {
+        double red = 0.0;
+        double green = 0.0;
+        double blue = 0.0;
+        uint64_t count = 0;
+    };
+    const double mergeDistance = 48.0;
+    const auto distance = [](const Cluster& cluster, double red, double green, double blue) {
+        const double dr = cluster.red - red;
+        const double dg = cluster.green - green;
+        const double db = cluster.blue - blue;
+        return std::sqrt(dr * dr + dg * dg + db * db);
+    };
+
+    std::vector<Cluster> clusters;
+    const size_t considered = std::min<size_t>(order.size(), 256);
+    const size_t clusterLimit = static_cast<size_t>(wanted) * 6;
+    for (size_t index = 0; index < considered; ++index) {
+        const Bucket& bucket = buckets[static_cast<size_t>(order[index])];
+        const double red = static_cast<double>(bucket.red) / static_cast<double>(bucket.count);
+        const double green = static_cast<double>(bucket.green) / static_cast<double>(bucket.count);
+        const double blue = static_cast<double>(bucket.blue) / static_cast<double>(bucket.count);
+        size_t best = clusters.size();
+        double bestDistance = mergeDistance;
+        for (size_t i = 0; i < clusters.size(); ++i) {
+            const double candidate = distance(clusters[i], red, green, blue);
+            if (candidate <= bestDistance) {
+                bestDistance = candidate;
+                best = i;
+            }
+        }
+        if (best == clusters.size()) {
+            if (clusters.size() >= clusterLimit) continue;
+            clusters.push_back(Cluster{red, green, blue, bucket.count});
+            continue;
+        }
+        Cluster& cluster = clusters[best];
+        const uint64_t combined = cluster.count + bucket.count;
+        cluster.red = (cluster.red * static_cast<double>(cluster.count) + red * static_cast<double>(bucket.count)) / static_cast<double>(combined);
+        cluster.green = (cluster.green * static_cast<double>(cluster.count) + green * static_cast<double>(bucket.count)) / static_cast<double>(combined);
+        cluster.blue = (cluster.blue * static_cast<double>(cluster.count) + blue * static_cast<double>(bucket.count)) / static_cast<double>(combined);
+        cluster.count = combined;
+    }
+
+    // Second pass: collapse clusters that ended up close to each other.
+    const double finalMerge = mergeDistance * 0.8;
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (size_t i = 0; i < clusters.size() && !merged; ++i) {
+            for (size_t j = i + 1; j < clusters.size(); ++j) {
+                if (distance(clusters[i], clusters[j].red, clusters[j].green, clusters[j].blue) > finalMerge) continue;
+                const Cluster source = clusters[j];
+                Cluster& target = clusters[i];
+                const uint64_t combined = target.count + source.count;
+                target.red = (target.red * static_cast<double>(target.count) + source.red * static_cast<double>(source.count)) / static_cast<double>(combined);
+                target.green = (target.green * static_cast<double>(target.count) + source.green * static_cast<double>(source.count)) / static_cast<double>(combined);
+                target.blue = (target.blue * static_cast<double>(target.count) + source.blue * static_cast<double>(source.count)) / static_cast<double>(combined);
+                target.count = combined;
+                clusters.erase(clusters.begin() + static_cast<ptrdiff_t>(j));
+                merged = true;
+                break;
+            }
+        }
+    }
+
+    std::sort(clusters.begin(), clusters.end(), [](const Cluster& left, const Cluster& right) {
+        return left.count > right.count;
+    });
+    if (clusters.size() > static_cast<size_t>(wanted)) clusters.resize(static_cast<size_t>(wanted));
+    entries.reserve(clusters.size());
+    for (const Cluster& cluster : clusters) {
+        PaletteEntry entry;
+        entry.color.r = static_cast<int>(std::lround(cluster.red));
+        entry.color.g = static_cast<int>(std::lround(cluster.green));
+        entry.color.b = static_cast<int>(std::lround(cluster.blue));
+        entry.ratio = static_cast<double>(cluster.count) / static_cast<double>(sampled);
+        entries.push_back(entry);
+    }
+    return entries;
+}
+
+// --- result dialog ---------------------------------------------------------
+
+HWND MakePaletteControl(HWND parent, const wchar_t* className, const wchar_t* text, DWORD style,
+                        int id, int x, int y, int width, int height) {
+    HWND control = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style,
+                                   x, y, width, height, parent,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
+    if (control && g_font) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+    return control;
+}
+
+std::wstring PaletteSwatchLabel(const PaletteEntry& entry) {
+    wchar_t buffer[64]{};
+    swprintf_s(buffer, L"%s  %.1f%%", ColorText(entry.color).c_str(), entry.ratio * 100.0);
+    return buffer;
+}
+
+COLORREF PaletteTextColour(const Color& color) {
+    // Rec. 601 luma keeps the label readable on both bright and dark swatches.
+    const int luma = (color.r * 299 + color.g * 587 + color.b * 114) / 1000;
+    return luma >= 140 ? RGB(16, 16, 16) : RGB(245, 245, 245);
+}
+
+void PaintPaletteSwatch(const DRAWITEMSTRUCT& item, const PaletteEntry& entry, bool selected) {
+    const RECT bounds = item.rcItem;
+    HBRUSH fill = CreateSolidBrush(RGB(entry.color.r, entry.color.g, entry.color.b));
+    FillRect(item.hDC, &bounds, fill);
+    DeleteObject(fill);
+
+    HPEN border = CreatePen(PS_SOLID, selected ? 3 : 1, selected ? RGB(255, 152, 0) : RGB(96, 96, 96));
+    HGDIOBJ previousPen = SelectObject(item.hDC, border);
+    HGDIOBJ previousBrush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(item.hDC, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    SelectObject(item.hDC, previousPen);
+    SelectObject(item.hDC, previousBrush);
+    DeleteObject(border);
+
+    RECT text = bounds;
+    text.left += 6;
+    text.right -= 6;
+    const std::wstring label = PaletteSwatchLabel(entry);
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, PaletteTextColour(entry.color));
+    DrawTextW(item.hDC, label.c_str(), -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if (item.itemState & ODS_FOCUS) DrawFocusRect(item.hDC, &bounds);
+}
+
+void PaintPalettePreview(HDC dc) {
+    const RECT frame{kPalettePreviewLeft, kPalettePreviewTop,
+                     kPalettePreviewLeft + kPalettePreviewWidth,
+                     kPalettePreviewTop + kPalettePreviewHeight};
+    HBRUSH background = CreateSolidBrush(RGB(32, 32, 36));
+    FillRect(dc, &frame, background);
+    DeleteObject(background);
+    if (!g_paletteBitmap.pixels.empty() && g_paletteBitmap.width > 0 && g_paletteBitmap.height > 0) {
+        const double horizontal = static_cast<double>(kPalettePreviewWidth) / static_cast<double>(g_paletteBitmap.width);
+        const double vertical = static_cast<double>(kPalettePreviewHeight) / static_cast<double>(g_paletteBitmap.height);
+        const double scale = std::min(horizontal, vertical);
+        const int drawWidth = std::max(1, static_cast<int>(static_cast<double>(g_paletteBitmap.width) * scale));
+        const int drawHeight = std::max(1, static_cast<int>(static_cast<double>(g_paletteBitmap.height) * scale));
+        const int drawLeft = frame.left + (kPalettePreviewWidth - drawWidth) / 2;
+        const int drawTop = frame.top + (kPalettePreviewHeight - drawHeight) / 2;
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = g_paletteBitmap.width;
+        info.bmiHeader.biHeight = -g_paletteBitmap.height;  // top-down, like our buffer
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        StretchDIBits(dc, drawLeft, drawTop, drawWidth, drawHeight, 0, 0,
+                      g_paletteBitmap.width, g_paletteBitmap.height,
+                      g_paletteBitmap.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    }
+    FrameRect(dc, &frame, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+}
+
+void EnablePaletteActions(HWND hwnd) {
+    const bool ready = g_paletteSelected >= 0 && g_paletteSelected < static_cast<int>(g_paletteEntries.size());
+    if (HWND apply = GetDlgItem(hwnd, IDC_PALETTE_APPLY_GLOBAL)) EnableWindow(apply, ready);
+    if (HWND apply = GetDlgItem(hwnd, IDC_PALETTE_APPLY_ALL)) EnableWindow(apply, ready);
+}
+
+void UpdatePaletteSwatches(HWND hwnd) {
+    for (int i = 0; i < kPaletteSwatchCount; ++i) {
+        HWND swatch = g_paletteSwatches[i];
+        if (!swatch) continue;
+        ShowWindow(swatch, i < static_cast<int>(g_paletteEntries.size()) ? SW_SHOW : SW_HIDE);
+        InvalidateRect(swatch, nullptr, TRUE);
+    }
+    EnablePaletteActions(hwnd);
+}
+
+void SelectPaletteEntry(HWND hwnd, int index) {
+    if (index < 0 || index >= static_cast<int>(g_paletteEntries.size())) return;
+    g_paletteSelected = index;
+    for (HWND swatch : g_paletteSwatches) {
+        if (swatch) InvalidateRect(swatch, nullptr, TRUE);
+    }
+    EnablePaletteActions(hwnd);
+}
+
+void RefreshPaletteFromClipboard(HWND hwnd) {
+    ClipboardBitmap bitmap;
+    std::wstring error;
+    g_paletteBitmap = ClipboardBitmap{};
+    g_paletteEntries.clear();
+    g_paletteSelected = -1;
+    g_paletteSampleCount = 0;
+
+    std::wstring info;
+    std::wstring status;
+    if (ReadClipboardImage(hwnd, bitmap, error)) {
+        g_paletteBitmap = std::move(bitmap);
+        g_paletteEntries = ExtractPalette(g_paletteBitmap, kPaletteSwatchCount, g_paletteSampleCount);
+        if (g_paletteEntries.empty()) {
+            info = L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002";
+            status = info;
+        } else {
+            const int colours = static_cast<int>(g_paletteEntries.size());
+            const int samples = static_cast<int>(std::min<uint64_t>(g_paletteSampleCount, 2000000000ull));
+            wchar_t buffer[256]{};
+            swprintf_s(buffer,
+                       L"\x56fe\x7247 %d x %d\xff0c\x91c7\x6837 %d \x50cf\x7d20\xff0c\x5171\x63d0\x53d6 %d \x4e2a\x989c\x8272\x3002",
+                       g_paletteBitmap.width, g_paletteBitmap.height, samples, colours);
+            info = buffer;
+            status = L"\x8bf7\x5148\x5728\x4e0a\x65b9\x9009\x62e9\x4e00\x4e2a\x989c\x8272\x3002";
+        }
+    } else {
+        info = error;
+        status = error;
+    }
+    SetControlText(g_paletteInfo, info);
+    SetControlText(g_paletteStatus, status);
+    UpdatePaletteSwatches(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+    UpdateWindow(hwnd);
+}
+
+void ApplyPaletteColour(HWND hwnd, bool toAllRules) {
+    if (g_paletteSelected < 0 || g_paletteSelected >= static_cast<int>(g_paletteEntries.size())) {
+        SetControlText(g_paletteStatus, L"\x8bf7\x5148\x5728\x4e0a\x65b9\x9009\x62e9\x4e00\x4e2a\x989c\x8272\x3002");
+        return;
+    }
+    const Color color = g_paletteEntries[static_cast<size_t>(g_paletteSelected)].color;
+    const std::wstring text = ColorText(color);
+    const int ruleCount = static_cast<int>(g_config.appRules.size());
+
+    if (toAllRules && ruleCount > 0) {
+        wchar_t question[512]{};
+        swprintf_s(question,
+                   L"\x5c06\x628a %s \x5e94\x7528\x5230\x5168\x90e8 %d \x6761\x4e13\x5c5e\x89c4\x5219\xff0c\x8986\x76d6\x6bcf\x6761\x89c4\x5219\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x662f\x5426\x7ee7\x7eed\xff1f",
+                   text.c_str(), ruleCount);
+        if (MessageBoxW(hwnd, question, L"\x786e\x8ba4\x8986\x76d6", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
+    }
+
+    // Unsaved edits in the rule form must survive, otherwise writing the colour
+    // below would silently discard them.
+    CaptureSelectedAppRule(false);
+
+    g_config.focused.color = color;
+    g_config.unfocused.color = color;
+    SetControlText(g_controls.fColor, text);
+    SetControlText(g_controls.uColor, text);
+
+    wchar_t buffer[512]{};
+    if (toAllRules) {
+        for (auto& rule : g_config.appRules) {
+            rule.focused.color = color;
+            rule.unfocused.color = color;
+        }
+        if (g_selectedAppRule >= 0 && g_selectedAppRule < ruleCount) {
+            PutAppRule(g_config.appRules[static_cast<size_t>(g_selectedAppRule)]);
+        }
+        swprintf_s(buffer,
+                   L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x548c %d \x6761\x4e13\x5c5e\x89c4\x5219\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002",
+                   text.c_str(), ruleCount);
+    } else {
+        swprintf_s(buffer,
+                   L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002",
+                   text.c_str());
+    }
+    const std::wstring message = buffer;
+    SetControlText(g_paletteStatus, message);
+    SetStatus(message);
+}
+
+void CreatePaletteControls(HWND hwnd) {
+    MakePaletteControl(hwnd, L"STATIC",
+                       L"\x5148\x7528\x622a\x56fe\x5de5\x5177\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x201c\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f\x201d",
+                       0, 0, 24, 14, 612, 22);
+    g_paletteInfo = MakePaletteControl(hwnd, L"STATIC", L"", SS_LEFT, IDC_PALETTE_INFO, 328, 48, 308, 150);
+    MakePaletteControl(hwnd, L"STATIC",
+                       L"\x51fa\x73b0\x9891\x7387\x6700\x9ad8\x7684\x989c\x8272\xff08\x70b9\x51fb\x9009\x62e9\xff09",
+                       0, 0, 24, 218, 612, 20);
+    for (int i = 0; i < kPaletteSwatchCount; ++i) {
+        const int column = i % 5;
+        const int row = i / 5;
+        g_paletteSwatches[i] = MakePaletteControl(hwnd, L"BUTTON", L"", WS_TABSTOP | BS_OWNERDRAW,
+                                                  IDC_PALETTE_SWATCH_BASE + i,
+                                                  24 + column * 124, 242 + row * 72, 116, 64);
+    }
+    g_paletteStatus = MakePaletteControl(hwnd, L"STATIC", L"", SS_LEFT, IDC_PALETTE_STATUS, 24, 386, 612, 20);
+    MakePaletteControl(hwnd, L"BUTTON", L"\x5e94\x7528\x5230\x5168\x5c40", WS_TABSTOP,
+                       IDC_PALETTE_APPLY_GLOBAL, 24, 412, 150, 34);
+    MakePaletteControl(hwnd, L"BUTTON", L"\x5e94\x7528\x5230\x5168\x90e8\x89c4\x5219\xff08\x542b\x4e13\x5c5e\xff09", WS_TABSTOP,
+                       IDC_PALETTE_APPLY_ALL, 184, 412, 220, 34);
+    MakePaletteControl(hwnd, L"BUTTON", L"\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f", WS_TABSTOP,
+                       IDC_PALETTE_READ, 414, 412, 130, 34);
+    MakePaletteControl(hwnd, L"BUTTON", L"\x5173\x95ed", WS_TABSTOP,
+                       IDC_PALETTE_CLOSE, 554, 412, 82, 34);
+}
+
+LRESULT CALLBACK PaletteProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE:
+        g_paletteWindow = hwnd;
+        CreatePaletteControls(hwnd);
+        RefreshPaletteFromClipboard(hwnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        // Labels must blend with the dialog background instead of the default
+        // white static background.
+        SetBkColor(reinterpret_cast<HDC>(wParam), GetSysColor(COLOR_BTNFACE));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+    case WM_DRAWITEM: {
+        const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (item && item->CtlType == ODT_BUTTON) {
+            const int index = static_cast<int>(item->CtlID) - IDC_PALETTE_SWATCH_BASE;
+            if (index >= 0 && index < static_cast<int>(g_paletteEntries.size())) {
+                PaintPaletteSwatch(*item, g_paletteEntries[static_cast<size_t>(index)], index == g_paletteSelected);
+                return TRUE;
+            }
+        }
+        break;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        PaintPalettePreview(dc);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        if (id >= IDC_PALETTE_SWATCH_BASE && id < IDC_PALETTE_SWATCH_BASE + kPaletteSwatchCount) {
+            SelectPaletteEntry(hwnd, id - IDC_PALETTE_SWATCH_BASE);
+            return 0;
+        }
+        switch (id) {
+        case IDC_PALETTE_READ: RefreshPaletteFromClipboard(hwnd); return 0;
+        case IDC_PALETTE_APPLY_GLOBAL: ApplyPaletteColour(hwnd, false); return 0;
+        case IDC_PALETTE_APPLY_ALL: ApplyPaletteColour(hwnd, true); return 0;
+        case IDC_PALETTE_CLOSE: DestroyWindow(hwnd); return 0;
+        default: break;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_paletteWindow = nullptr;
+        g_paletteInfo = nullptr;
+        g_paletteStatus = nullptr;
+        for (HWND& swatch : g_paletteSwatches) swatch = nullptr;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+bool EnsurePaletteClass() {
+    static bool registered = false;
+    if (registered) return true;
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = PaletteProc;
+    windowClass.hInstance = g_instance;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    windowClass.lpszClassName = L"WinGlassPaletteDialog";
+    windowClass.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    windowClass.hIconSm = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    registered = RegisterClassExW(&windowClass) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    return registered;
+}
+
+void OpenPaletteDialog() {
+    if (g_paletteWindow) {
+        SetForegroundWindow(g_paletteWindow);
+        return;
+    }
+    if (!EnsurePaletteClass()) return;
+    RECT rect{0, 0, kPaletteClientWidth, kPaletteClientHeight};
+    const DWORD style = WS_CAPTION | WS_SYSMENU | WS_POPUP;
+    AdjustWindowRectEx(&rect, style, FALSE, WS_EX_DLGMODALFRAME);
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WinGlassPaletteDialog",
+                                  L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272", style,
+                                  CW_USEDEFAULT, CW_USEDEFAULT,
+                                  rect.right - rect.left, rect.bottom - rect.top,
+                                  g_window, nullptr, g_instance, nullptr);
+    if (!dialog) return;
+    EnableWindow(g_window, FALSE);
+    ShowWindow(dialog, SW_SHOWNORMAL);
+    MSG message{};
+    while (IsWindow(dialog) && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(g_window, TRUE);
+    SetForegroundWindow(g_window);
+}
+
 bool SaveFromControls() {
     EditorConfig updated = g_config;
     updated.enabled = SendMessageW(g_controls.enabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1088,6 +1846,12 @@ void OpenConfigFolder() {
 void CreateControls() {
     g_controls.enabled = MakeControl(L"BUTTON", L"\x5168\x5c40\x542f\x7528 WinGlass", BS_AUTOCHECKBOX,
                                      IDC_ENABLED, 24, 18, 260, 24);
+    // Experimental wallpaper helper: the palette dialog reads a screenshot
+    // from the clipboard, so nothing here depends on where the wallpaper comes
+    // from (plain image, live wallpaper, slideshow, ...).
+    MakeControl(L"BUTTON", L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272\xff08\x5b9e\x9a8c\xff09", 0,
+                IDC_PALETTE_OPEN, 298, 14, 200, 30);
+    MakeLabel(L"\x622a\x56fe\x540e\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x6b64\x5206\x6790", 508, 18, 270);
     MakeAppearanceGroup(L"\x805a\x7126\x7a97\x53e3", IDC_F_TARGET, 20, 55);
     MakeAppearanceGroup(L"\x5931\x6d3b\x7a97\x53e3", IDC_U_TARGET, 405, 55);
 
@@ -1151,6 +1915,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             }
             return 0;
         case IDC_OPEN_FOLDER: OpenConfigFolder(); return 0;
+        case IDC_PALETTE_OPEN: OpenPaletteDialog(); return 0;
         case IDC_EXIT: DestroyWindow(hwnd); return 0;
         default: break;
         }
@@ -1169,8 +1934,33 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCommand) {
     g_instance = instance;
+    // The experimental clipboard palette decodes PNG through the Windows
+    // Imaging Component, which needs COM on the UI thread.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // Diagnostic mode: read whatever image is currently on the clipboard, print
+    // the extracted palette and exit. It runs the exact code path the dialog
+    // uses, which makes "my screenshot produced odd colours" easy to check.
+    if (commandLine && wcsstr(commandLine, L"--palette-self-test")) {
+        ClipboardBitmap bitmap;
+        std::wstring error;
+        if (!ReadClipboardImage(nullptr, bitmap, error)) {
+            std::wprintf(L"clipboard image unavailable: %ls\n", error.c_str());
+            CoUninitialize();
+            return 4;
+        }
+        uint64_t sampled = 0;
+        const std::vector<PaletteEntry> palette = ExtractPalette(bitmap, kPaletteSwatchCount, sampled);
+        std::wprintf(L"source=%ls\nimage %dx%d sampled=%llu colours=%zu\n", g_paletteSourceDescription.c_str(),
+                     bitmap.width, bitmap.height, static_cast<unsigned long long>(sampled), palette.size());
+        for (const PaletteEntry& entry : palette) {
+            std::wprintf(L"#%02X%02X%02X %.2f%%\n", entry.color.r, entry.color.g, entry.color.b,
+                         entry.ratio * 100.0);
+        }
+        CoUninitialize();
+        return palette.empty() ? 5 : 0;
+    }
     // ListView itself can be registered by another application component, but
     // its image-list support is only dependable after explicit initialization.
     INITCOMMONCONTROLSEX commonControls{};
@@ -1209,5 +1999,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    CoUninitialize();
     return static_cast<int>(message.wParam);
 }

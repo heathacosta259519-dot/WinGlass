@@ -16,7 +16,9 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $editorSource = Join-Path $root 'winglass-config.cpp'
 $editorOutput = Join-Path $root 'winglass-config.exe'
-cmd /c "`"$vs`" && cl /nologo /std:c++17 /EHsc /W4 `"$editorSource`" `"$resource`" /link /SUBSYSTEM:WINDOWS /OUT:`"$editorOutput`" user32.lib gdi32.lib shell32.lib comctl32.lib"
+# The editor needs the Windows Imaging Component (PNG clipboard decoding) and
+# ole32 for COM; neither is required by the resident process or the watchdog.
+cmd /c "`"$vs`" && cl /nologo /std:c++17 /EHsc /W4 `"$editorSource`" `"$resource`" /link /SUBSYSTEM:WINDOWS /OUT:`"$editorOutput`" user32.lib gdi32.lib shell32.lib comctl32.lib windowscodecs.lib ole32.lib"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $watchdogSource = Join-Path $root 'winglass-watchdog.cpp'
