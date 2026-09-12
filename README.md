@@ -185,6 +185,7 @@ global:
   focused:                      # window has focus
     target_opacity: 0.60        # how far the window content yields (lower = more transparent)
     enable_glass: true          # frosted backdrop on/off
+    exclude_fullscreen: true    # restore the original window during full-screen video
     glass_color: "#00345A"      # glass tint
     glass_opacity: 0.98         # glass density ceiling
     tint_opacity: 0.30          # tint strength
@@ -192,6 +193,7 @@ global:
   unfocused:                    # unfocused: a completely independent set
     target_opacity: 0.50
     enable_glass: true
+    exclude_fullscreen: true
     glass_color: "#00345A"
     glass_opacity: 0.96
     tint_opacity: 0.20
@@ -220,6 +222,7 @@ applications:
 | `enabled` (global level) | `[Global] enabled` | `true` / `false` | `true` | Master switch; turning it off restores every window |
 | `target_opacity` | `active_opacity` / `inactive_opacity` | `0–1` (also accepts `0–100`, `0–255`) | `0.90` / `0.82` | Opacity of the target window content |
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | Frosted backdrop on/off; tint remains when off |
+| `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | Temporarily restore full-screen, borderless windows such as browser video and games |
 | `glass_color` | `active_tint_color` / `inactive_tint_color` | `#RRGGBB` | `#2C3E58` / `#1F2A3C` | Glass colour |
 | `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | Glass density ceiling |
 | `tint_opacity` | `active_tint_strength` / `inactive_tint_strength` | `0–1` | `0.34` / `0.30` | Tint strength |
@@ -293,9 +296,10 @@ Design choices that keep the cost down: fully occluded or minimised windows are 
 
 1. **The blur radius cannot be changed.** The frost is rendered by DWM and its radius is hard-coded inside the system; there is no public API or registry key for it. `blur_strength` in the config is therefore ignored (kept only for backward compatibility). Fine-grained control would require a self-drawn blur, at the cost of real-time behaviour.
 2. **WPF windows may not work.** They typically paint a fully opaque surface and never yield their background; add the process to `blacklist` for those.
-3. **System windows are skipped by default**: desktop, taskbar, secondary taskbars and UWP core windows are skipped directly by the program, as are all tool windows (`WS_EX_TOOLWINDOW`) and owned popups; the bundled example config additionally blacklists Start menu, Search and notification-area hosts. This avoids most cases where "beautifying" makes things look worse.
-4. **UWP / Store apps**: their content is self-drawn, so whether the background shows through depends on the app.
-5. Only a **Windows 11 + x64** build script is provided; other platforms need their own compiler flags.
+3. **Full-screen exclusion is window-level**: it reliably handles a browser/player full-screen surface, but cannot identify the rectangle of an embedded HTML video inside an ordinary browser window.
+4. **System windows are skipped by default**: desktop, taskbar, secondary taskbars and UWP core windows are skipped directly by the program, as are all tool windows (`WS_EX_TOOLWINDOW`) and owned popups; the bundled example config additionally blacklists Start menu, Search and notification-area hosts. This avoids most cases where "beautifying" makes things look worse.
+5. **UWP / Store apps**: their content is self-drawn, so whether the background shows through depends on the app.
+6. Only a **Windows 11 + x64** build script is provided; other platforms need their own compiler flags.
 
 ## Project structure
 

@@ -42,6 +42,7 @@ global:
   focused:                     # 聚焦态
     target_opacity: 0.60       # 目标窗口内容让位程度，0.05–1.0（越低越透）
     enable_glass: true         # 是否启用磨砂背板；关掉仍保留纯染色
+    exclude_fullscreen: true   # 全屏视频/游戏时恢复原窗口，不覆盖画面
     glass_color: "#00345A"     # 玻璃颜色 #RRGGBB
     glass_opacity: 0.98        # 玻璃浓度上限
     tint_opacity: 0.38         # 染色强度
@@ -49,6 +50,7 @@ global:
   unfocused:                   # 失焦态：与聚焦态完全独立的另一套参数
     target_opacity: 0.50
     enable_glass: true
+    exclude_fullscreen: true
     glass_color: "#00345A"
     glass_opacity: 0.96
     tint_opacity: 0.20
@@ -58,12 +60,13 @@ global:
 applications:
   - match:
       process: "msedge.exe"
-    rules:
+      rules:
       - type: focused
         config:
           target_opacity: 0.60
           glass_color: "#353E62"
           tint_opacity: 0.40
+          exclude_fullscreen: true
       - type: unfocused
         config:
           target_opacity: 0.20

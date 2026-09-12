@@ -183,6 +183,7 @@ global:
   focused:                      # 窗口处于聚焦态
     target_opacity: 0.60        # 目标窗口内容让位程度（越低越透）
     enable_glass: true          # 是否启用磨砂
+    exclude_fullscreen: true    # 全屏视频/游戏时恢复原窗口
     glass_color: "#00345A"      # 玻璃染色
     glass_opacity: 0.98         # 玻璃浓度上限
     tint_opacity: 0.30          # 染色强度
@@ -190,6 +191,7 @@ global:
   unfocused:                    # 失焦态：两套参数各管一套
     target_opacity: 0.50
     enable_glass: true
+    exclude_fullscreen: true
     glass_color: "#00345A"
     glass_opacity: 0.96
     tint_opacity: 0.20
@@ -218,6 +220,7 @@ applications:
 | `enabled`（global 级） | `[Global] enabled` | `true` / `false` | `true` | 总开关；关掉会还原所有窗口 |
 | `target_opacity` | `active_opacity` / `inactive_opacity` | `0–1`（也接受 `0–100`、`0–255`） | `0.90` / `0.82` | 目标窗口内容的不透明度 |
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | 是否启用磨砂背板；关掉后仍保留纯染色 |
+| `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | 检测到覆盖整个显示器的无边框窗口时，暂时恢复原样；适合浏览器全屏视频和游戏 |
 | `glass_color` | `active_tint_color` / `inactive_tint_color` | `#RRGGBB` | `#2C3E58` / `#1F2A3C` | 玻璃颜色 |
 | `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | 玻璃浓度上限 |
 | `tint_opacity` | `active_tint_strength` / `inactive_tint_strength` | `0–1` | `0.34` / `0.30` | 染色强度 |
@@ -291,9 +294,10 @@ applications:
 
 1. **模糊半径不可调**。磨砂由 DWM 渲染，半径写死在系统内部，没有公开 API 或注册表项可以改。因此配置里的 `blur_strength` 会被忽略（保留仅为兼容旧配置）。想要"精细调节模糊强度"，只能改用自绘模糊方案，代价是失去实时性。
 2. **WPF 窗口可能无效**。它们常用完全不透明的自绘表面，让不出背景；把对应进程加进 `blacklist` 即可。
-3. **系统窗口默认跳过**：桌面、任务栏、副屏任务栏、UWP 核心窗口由程序直接跳过，所有工具窗口（`WS_EX_TOOLWINDOW`）与有属主的弹窗也不处理；随附的示例配置另外把开始菜单、搜索、通知区域宿主列入了黑名单。这样能避开大多数"美化之后反而难看"的场景。
-4. **UWP / 商店应用** 的内容区由应用自绘，能否透出背景取决于该应用本身。
-5. **仅提供 Windows 11 + x64 的构建脚本**，其他平台需要自行调整编译参数。
+3. **全屏排除是窗口级判断**：它能可靠处理浏览器/播放器的全屏窗口，但无法从浏览器外部识别普通网页内嵌视频的矩形区域；后者仍会沿用整个浏览器窗口的效果。
+4. **系统窗口默认跳过**：桌面、任务栏、副屏任务栏、UWP 核心窗口由程序直接跳过，所有工具窗口（`WS_EX_TOOLWINDOW`）与有属主的弹窗也不处理；随附的示例配置另外把开始菜单、搜索、通知区域宿主列入了黑名单。这样能避开大多数"美化之后反而难看"的场景。
+5. **UWP / 商店应用** 的内容区由应用自绘，能否透出背景取决于该应用本身。
+6. **仅提供 Windows 11 + x64 的构建脚本**，其他平台需要自行调整编译参数。
 
 ## 项目结构
 

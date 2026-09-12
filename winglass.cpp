@@ -55,6 +55,9 @@ struct Rule {
     double activeTintStrength = 0.34;
     double inactiveTintStrength = 0.30;
     int transitionMs = 180;
+    // Full-screen browser video and games should remain pixel-perfect.  This
+    // is enabled by default and can be overridden per application rule.
+    bool excludeFullscreen = true;
 };
 
 struct Config {
@@ -404,6 +407,7 @@ void SetField(Rule& rule, const std::wstring& key, const std::wstring& value) {
     else if (k == L"active_tint_strength") rule.activeTintStrength = ParseDouble(value, rule.activeTintStrength, 0.0, 1.0);
     else if (k == L"inactive_tint_strength") rule.inactiveTintStrength = ParseDouble(value, rule.inactiveTintStrength, 0.0, 1.0);
     else if (k == L"transition_ms") rule.transitionMs = ParseInt(value, rule.transitionMs, 0, 5000);
+    else if (k == L"exclude_fullscreen" || k == L"exclude_fullscreen_video") rule.excludeFullscreen = ParseBool(value, rule.excludeFullscreen);
 }
 
 bool SameFileTime(const FILETIME& a, const FILETIME& b) { return a.dwLowDateTime == b.dwLowDateTime && a.dwHighDateTime == b.dwHighDateTime; }
@@ -474,6 +478,7 @@ void SetYamlStateField(Rule& rule, bool focused, const std::wstring& key, const 
     else if (k == L"glass_opacity") { if (focused) rule.activeGlassOpacity = ParseFlexibleOpacity(value, rule.activeGlassOpacity); else rule.inactiveGlassOpacity = ParseFlexibleOpacity(value, rule.inactiveGlassOpacity); }
     else if (k == L"tint_opacity" || k == L"tint_strength") { if (focused) rule.activeTintStrength = ParseFlexibleOpacity(value, rule.activeTintStrength); else rule.inactiveTintStrength = ParseFlexibleOpacity(value, rule.inactiveTintStrength); }
     else if (k == L"animation_duration_ms" || k == L"transition_ms") rule.transitionMs = ParseInt(value, rule.transitionMs, 0, 5000);
+    else if (k == L"exclude_fullscreen" || k == L"exclude_fullscreen_video") rule.excludeFullscreen = ParseBool(value, rule.excludeFullscreen);
 }
 
 bool LoadYamlConfig(Config& result, const std::wstring& path) {
@@ -887,13 +892,72 @@ std::wstring ProcessName(HWND hwnd) {
     return result;
 }
 
+// Forward declaration because full-screen exclusion is part of the generic
+// window filter, while the application-specific rule lookup is defined below.
+Rule RuleFor(HWND hwnd, std::wstring& process);
+
+bool IsKnownBrowserProcess(const std::wstring& process) {
+    // Chromium/Firefox video full-screen windows are normally borderless, but
+    // some browser builds keep an overlapped style while they resize the same
+    // top-level HWND.  The process check makes that transition safe without
+    // touching ordinary maximized browser windows.
+    return process == L"msedge.exe" || process == L"chrome.exe" ||
+           process == L"firefox.exe" || process == L"brave.exe" ||
+           process == L"opera.exe" || process == L"vivaldi.exe";
+}
+
+bool CoversMonitor(const RECT& windowRect, const RECT& monitorRect) {
+    // DWM's extended frame can differ from the monitor by a few physical
+    // pixels because of invisible resize borders and mixed-DPI rounding.
+    constexpr int kFullscreenTolerancePx = 8;
+    return std::abs(windowRect.left - monitorRect.left) <= kFullscreenTolerancePx &&
+           std::abs(windowRect.top - monitorRect.top) <= kFullscreenTolerancePx &&
+           std::abs(windowRect.right - monitorRect.right) <= kFullscreenTolerancePx &&
+           std::abs(windowRect.bottom - monitorRect.bottom) <= kFullscreenTolerancePx;
+}
+
+bool IsFullscreenSurface(HWND hwnd) {
+    if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) ||
+        GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+
+    RECT windowRect{};
+    if (!GetWindowRect(hwnd, &windowRect)) return false;
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor) return false;
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo) ||
+        !CoversMonitor(windowRect, monitorInfo.rcMonitor)) return false;
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const bool borderless = (style & WS_CAPTION) == 0 && (style & WS_THICKFRAME) == 0;
+    if (borderless) return true;
+
+    // A browser can briefly retain WS_CAPTION during its full-screen resize.
+    // Only accept that case for a known browser process; this prevents a
+    // normally maximized business application from being mistaken for video.
+    return IsKnownBrowserProcess(ProcessName(hwnd));
+}
+
+bool FullscreenExclusionEnabled(HWND hwnd) {
+    if (!IsFullscreenSurface(hwnd)) return false;
+    std::wstring process;
+    const Rule rule = RuleFor(hwnd, process);
+    return rule.excludeFullscreen;
+}
+
 bool IsExcluded(HWND hwnd) {
     if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return true;
     LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (ex & WS_EX_TOOLWINDOW) return true;
     wchar_t cls[128]{}; GetClassNameW(hwnd, cls, 128);
     const auto c = Lower(cls);
-    return c == L"progman" || c == L"workerw" || c == L"shell_traywnd" || c == L"shell_secondarytraywnd" || c == L"windows.ui.core.corewindow" || c == L"winglassbackdropwindow";
+    if (c == L"progman" || c == L"workerw" || c == L"shell_traywnd" ||
+        c == L"shell_secondarytraywnd" || c == L"windows.ui.core.corewindow" ||
+        c == L"winglassbackdropwindow") return true;
+    // Full-screen video is a temporary exclusion: the normal window rule is
+    // preserved and will be reapplied as soon as the browser leaves full-screen.
+    return FullscreenExclusionEnabled(hwnd);
 }
 
 Rule RuleFor(HWND hwnd, std::wstring& process) {
@@ -1556,6 +1620,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     MSG msg{};
     ULONGLONG lastTrack = 0, lastSweep = 0, lastConfigCheck = 0, lastTrayRetry = 0;
     HWND lastForeground = nullptr;
+    bool lastForegroundFullscreen = false;
     bool running = true;
     while (running) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1565,6 +1630,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
         if (!running) break;
         const ULONGLONG now = GetTickCount64();
         const HWND foreground = GetForegroundWindow();
+        // Full-screen video often keeps the same browser HWND and therefore
+        // does not generate a foreground change.  Check only the foreground
+        // geometry on the existing 8 ms cadence and request one immediate
+        // sweep when the full-screen state toggles; no process scan is added
+        // to the steady-state path for ordinary windows.
+        const bool foregroundFullscreen = FullscreenExclusionEnabled(foreground);
+        if (foregroundFullscreen != lastForegroundFullscreen) {
+            lastForegroundFullscreen = foregroundFullscreen;
+            g_sweepRequested = true;
+        }
         if (foreground != lastForeground || g_sweepRequested) {
             // Alt+Tab changes foreground before its translucent/opaque shell
             // surface disappears. Sweep immediately on both edges so the
