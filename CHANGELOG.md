@@ -35,8 +35,8 @@ not a commit-by-commit log, and not the internal development journal.
 - **The English README is now the primary document** (`README.md`); the
   Simplified-Chinese one is `README.zh-CN.md`.
 - **The build writes everything into `release`** — executables, intermediate
-  files, the example configuration, `LICENSE` and `README.md`. The source tree
-  no longer accumulates build output.
+  files, the example configuration, `LICENSE` and a short distribution readme.
+  The source tree no longer accumulates build output.
 
 ### Fixed
 

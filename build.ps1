@@ -43,10 +43,15 @@ Build-Target -Name 'winglass-watchdog' -TargetDefine 'WINGLASS_TARGET_WATCHDOG' 
 
 # winglass.exe resolves its configuration relative to its own directory, not
 # the current one, so a bare release folder cannot start. Ship the example
-# configuration next to the binaries, plus the license and the readme, so the
-# folder is a complete and self-describing distribution.
-foreach ($extra in 'config.example.yaml', 'config.example.ini', 'LICENSE', 'README.md') {
+# configuration and the license next to the binaries, so the folder is a
+# complete and license-compliant distribution.
+foreach ($extra in 'config.example.yaml', 'config.example.ini', 'LICENSE') {
     Copy-Item (Join-Path $root $extra) (Join-Path $build $extra) -Force
 }
+
+# The distribution gets its own short readme, not the repository one: the
+# repository README documents building from source and its relative paths do
+# not apply to somebody who just unzipped a release.
+Copy-Item (Join-Path $root 'README.release.txt') (Join-Path $build 'README.txt') -Force
 
 Write-Output "Built winglass.exe, winglass-config.exe and winglass-watchdog.exe into $build (x64, application icon + version info)."
