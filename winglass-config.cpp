@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,6 +30,165 @@
 #pragma comment(lib, "shell32.lib")
 
 namespace {
+
+// Every string the config editor can display. Both languages sit side by side
+// so a translation can be compared at a glance, and this table is the one
+// place a new string has to be added. The editor keeps its own table, because
+// the three executables share no code beyond the resource identifiers. Only
+// display text belongs here: YAML/INI keys, file names, window class names and
+// the "#RRGGBB" example are data and stay in the code unchanged.
+#define WINGLASS_EDITOR_TEXTS(T) \
+    T(WindowTitle, L"WinGlass \x914d\x7f6e\x7f16\x8f91\x5668", L"WinGlass Settings Editor") \
+    T(TabGlobal, L"\x5168\x5c40", L"Global") \
+    T(TabApplications, L"\x4e13\x5c5e\x89c4\x5219", L"Applications") \
+    T(TabBlacklist, L"\x9ed1\x540d\x5355", L"Blacklist") \
+    T(CheckboxEnable, L"\x5168\x5c40\x542f\x7528 WinGlass", L"Enable WinGlass globally") \
+    T(ButtonExtractPalette, L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272\xff08\x5b9e\x9a8c\xff09", L"Extract palette from clipboard (experimental)") \
+    T(LabelPaletteHint, L"\x622a\x56fe\x540e\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x6b64\x5206\x6790", L"Screenshot the desktop, copy it to the clipboard, then click here to analyse") \
+    T(LabelInterfaceLanguage, L"\x754c\x9762\x8bed\x8a00", L"Interface language") \
+    T(ComboFollowSystem, L"\x8ddf\x968f\x7cfb\x7edf", L"Follow system") \
+    T(ComboChinese, L"\x4e2d\x6587", L"Chinese") \
+    T(ComboEnglish, L"\x82f1\x6587", L"English") \
+    T(GroupFocusedWindow, L"\x805a\x7126\x7a97\x53e3", L"Focused window") \
+    T(GroupUnfocusedWindow, L"\x5931\x6d3b\x7a97\x53e3", L"Unfocused window") \
+    T(LabelTargetOpacity, L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", L"Target opacity (0.05 - 1.0)") \
+    T(LabelEnableGlass, L"\x542f\x7528\x6bdb\x73bb\x7483", L"Enable frosted glass") \
+    T(LabelGlassColor, L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", L"Glass / tint colour (#RRGGBB)") \
+    T(LabelGlassOpacity, L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", L"Glass opacity (0 - 1)") \
+    T(LabelTintStrength, L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", L"Tint strength (0 - 1)") \
+    T(LabelAnimationDuration, L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", L"Animation duration (ms)") \
+    T(LabelExcludeFullscreen, L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", L"Exclude during full-screen video") \
+    T(GroupRunningProcesses, L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", L"Running processes and per-app rules") \
+    T(LabelSelectedProcess, L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", L"Selected process:") \
+    T(StatusNoProcessSelected, L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", L"No process selected") \
+    T(ButtonChooseProcess, L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b...", L"Choose a running process...") \
+    T(ButtonAddBlacklist, L"\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x4fdd\x5b58", L"Add to blacklist and save") \
+    T(ButtonCreateRule, L"\x521b\x5efa\x4e13\x5c5e\x89c4\x5219", L"Create per-app rule") \
+    T(LabelExistingRules, L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", L"Existing per-app rules") \
+    T(ButtonRemoveRule, L"\x5220\x9664\x5f53\x524d\x89c4\x5219", L"Remove current rule") \
+    T(GroupMatchConditions, L"\x5339\x914d\x6761\x4ef6\xff08\x7a7a\x5219\x4e0d\x53c2\x4e0e\x5339\x914d\xff09", L"Match conditions (empty fields do not participate)") \
+    T(LabelMatchClass, L"\x7a97\x53e3\x7c7b\x540d", L"Window class") \
+    T(LabelMatchTitle, L"\x6807\x9898\x5305\x542b", L"Title contains") \
+    T(LabelMatchAumid, L"\x5e94\x7528\x5305\x6807\x8bc6\xff08" L"AUMID\xff09", L"Package identity (" L"AUMID)") \
+    T(LabelAumidExample, L"\x5546\x5e97\x5e94\x7528\x7684\x5305\x6807\x8bc6\xff0c\x4f8b\xff1a Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", L"Package identity of a Store app, for example Microsoft.WindowsCalculator_8wekyb3d8bbwe!App") \
+    T(GroupAppRuleFocused, L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", L"Per-app rule: focused window") \
+    T(GroupAppRuleUnfocused, L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", L"Per-app rule: unfocused window") \
+    T(GroupBlacklistProcesses, L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", L"Blacklisted processes (one per line)") \
+    T(GroupBlacklistClasses, L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", L"Blacklisted window classes (one per line)") \
+    T(LabelBlacklistNote, L"\x547d\x4e2d\x9ed1\x540d\x5355\x7684\x7a97\x53e3\x88ab\x5b8c\x5168\x8df3\x8fc7\xff0c\x4e0d\x6e32\x67d3\x4e5f\x4e0d\x4fee\x6539\x6837\x5f0f\x3002", L"Windows that hit the blacklist are skipped entirely: neither rendered nor restyled.") \
+    T(LabelSaveNote, L"\x9ed1\x540d\x5355\x4e0e\x4e13\x5c5e\x89c4\x5219\x4f1a\x5199\x5165 config.yaml\xff0c\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x5e94\x7528\x3002", L"The blacklist and per-app rules are written to config.yaml, and a running WinGlass applies them automatically.") \
+    T(ButtonSave, L"\x4fdd\x5b58\x5e76\x5e94\x7528", L"Save and apply") \
+    T(ButtonReload, L"\x91cd\x65b0\x52a0\x8f7d", L"Reload") \
+    T(ButtonOpenFolder, L"\x6253\x5f00\x6587\x4ef6\x5939", L"Open folder") \
+    T(ButtonClose, L"\x5173\x95ed", L"Close") \
+    T(MsgColorFormat, L"\x989c\x8272\x5fc5\x987b\x4f7f\x7528 #RRGGBB \x683c\x5f0f\x3002", L"The colour must use the #RRGGBB format.") \
+    T(TitleColorInvalid, L"\x989c\x8272\x65e0\x6548", L"Invalid colour") \
+    T(StatusSelectedFormat, L"\x5df2\x9009\x62e9 %ls\x3002", L"Selected %ls.") \
+    T(PickerTitle, L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b", L"Choose a running process") \
+    T(PickerMenuFile, L"\x6587\x4ef6", L"File") \
+    T(PickerMenuRefresh, L"\x5237\x65b0\x5217\x8868", L"Refresh list") \
+    T(PickerTabApplications, L"\x5e94\x7528\x7a0b\x5e8f", L"Applications") \
+    T(PickerTabProcesses, L"\x8fdb\x7a0b", L"Processes") \
+    T(PickerTabWindows, L"\x7a97\x53e3", L"Windows") \
+    T(PickerTabPackages, L"\x5546\x5e97\x5e94\x7528", L"Store apps") \
+    T(PickerButtonOpen, L"\x6253\x5f00", L"Open") \
+    T(PickerButtonCancel, L"\x53d6\x6d88", L"Cancel") \
+    T(ErrClipboardImageCorrupt, L"\x526a\x8d34\x677f\x56fe\x7247\x6570\x636e\x4e0d\x5b8c\x6574\x6216\x5df2\x635f\x574f\x3002", L"The clipboard image data is incomplete or damaged.") \
+    T(ErrClipboardImageDepth, L"\x526a\x8d34\x677f\x56fe\x7247\x7684\x4f4d\x6df1\x4e0d\x53d7\x652f\x6301\x3002", L"The clipboard image bit depth is not supported.") \
+    T(ErrPngDecoderUnavailable, L"\x65e0\x6cd5\x521d\x59cb\x5316\x56fe\x7247\x89e3\x7801\x5668\xff0cPNG \x683c\x5f0f\x4e0d\x53ef\x7528\x3002", L"Could not initialise the image decoder; the PNG format is unavailable.") \
+    T(ErrClipboardImageDecode, L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002", L"Failed to decode the clipboard image.") \
+    T(ErrClipboardNoImage, L"\x526a\x8d34\x677f\x91cc\x6ca1\x6709\x56fe\x7247\x3002\x8bf7\x5148\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\x3002", L"There is no image on the clipboard. Capture the icon-free desktop and copy it to the clipboard first.") \
+    T(StatusSelectColor, L"\x8bf7\x5148\x5728\x4e0a\x65b9\x9009\x62e9\x4e00\x4e2a\x989c\x8272\x3002", L"Select a colour above first.") \
+    T(PaletteInfoFormat, L"\x56fe\x7247 %d x %d\xff0c\x91c7\x6837 %d \x50cf\x7d20\xff0c\x5171\x63d0\x53d6 %d \x4e2a\x989c\x8272\x3002", L"Image %d x %d, sampled %d pixels, extracted %d colours.") \
+    T(PaletteApplyAllConfirmFormat, L"\x5c06\x628a %s \x5e94\x7528\x5230\x5168\x90e8 %d \x6761\x4e13\x5c5e\x89c4\x5219\xff0c\x8986\x76d6\x6bcf\x6761\x89c4\x5219\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x662f\x5426\x7ee7\x7eed\xff1f", L"Apply %s to all %d per-app rules and overwrite each rule's focused and unfocused colour. Continue?") \
+    T(TitleConfirmOverwrite, L"\x786e\x8ba4\x8986\x76d6", L"Confirm overwrite") \
+    T(PaletteAppliedAllFormat, L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x548c %d \x6761\x4e13\x5c5e\x89c4\x5219\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002", L"Applied %s to the global settings and %d per-app rules. Click \"Save and apply\" to write config.yaml.") \
+    T(PaletteAppliedGlobalFormat, L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002", L"Applied %s to the global focused and unfocused colours. Click \"Save and apply\" to write config.yaml.") \
+    T(PaletteHelpText, L"\x5148\x7528\x622a\x56fe\x5de5\x5177\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x201c\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f\x201d", L"Screenshot the icon-free desktop and copy it to the clipboard, then click \"Read clipboard again\".") \
+    T(PaletteFrequentColors, L"\x51fa\x73b0\x9891\x7387\x6700\x9ad8\x7684\x989c\x8272\xff08\x70b9\x51fb\x9009\x62e9\xff09", L"Most frequent colours (click to select)") \
+    T(PaletteApplyGlobal, L"\x5e94\x7528\x5230\x5168\x5c40", L"Apply to global") \
+    T(PaletteApplyAllRules, L"\x5e94\x7528\x5230\x5168\x90e8\x89c4\x5219\xff08\x542b\x4e13\x5c5e\xff09", L"Apply to all rules (including per-app)") \
+    T(PaletteReadClipboard, L"\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f", L"Read clipboard again") \
+    T(PaletteTitle, L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272", L"Extract palette from clipboard") \
+    T(StatusSaved, L"\x5df2\x4fdd\x5b58\x3002\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x91cd\x65b0\x52a0\x8f7d\x3002", L"Saved. A running WinGlass reloads automatically.") \
+    T(MsgRuleNeedsMatcher, L"\x6bcf\x6761\x4e13\x5c5e\x89c4\x5219\x81f3\x5c11\x9700\x8981\x4e00\x4e2a\x5339\x914d\x6761\x4ef6\x3002", L"Every per-app rule needs at least one match condition.") \
+    T(TitleMatcherMissing, L"\x5339\x914d\x6761\x4ef6\x7f3a\x5931", L"Match condition missing") \
+    T(StatusSelectProcess, L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002", L"Select a running process first.") \
+    T(StatusStoreAppUseRule, L"\x5546\x5e97\x5e94\x7528\x8bf7\x7528\x4e13\x5c5e\x89c4\x5219\x6309\x5305\x6807\x8bc6\x5339\x914d\x3002", L"For a Store app, create a per-app rule that matches its package identity.") \
+    T(StatusAddedBlacklistFormat, L"%ls \x5df2\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002", L"Added %ls to the blacklist and saved it permanently.") \
+    T(StatusRuleExistsFormat, L"%ls \x5df2\x5b58\x5728\x4e13\x5c5e\x89c4\x5219\x3002", L"A per-app rule for %ls already exists.") \
+    T(StatusRuleCreatedFormat, L"%ls \x5df2\x521b\x5efa\x4e13\x5c5e\x89c4\x5219\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002", L"Created a per-app rule for %ls and saved it permanently.") \
+    T(StatusRuleRemovedFormat, L"%ls \x7684\x4e13\x5c5e\x89c4\x5219\x5df2\x5220\x9664\x5e76\x4fdd\x5b58\x3002", L"Removed the per-app rule for %ls and saved.") \
+    T(ErrLoadConfig, L"\x65e0\x6cd5\x8bfb\x53d6 config.yaml \x6216 config.ini\x3002", L"Could not read config.yaml or config.ini.") \
+    T(TitleLoadFailed, L"\x52a0\x8f7d\x5931\x8d25", L"Load failed") \
+    T(StatusConfigReloaded, L"\x914d\x7f6e\x5df2\x91cd\x65b0\x52a0\x8f7d\x3002", L"Configuration reloaded.") \
+    T(ErrWriteConfig, L"\x65e0\x6cd5\x5199\x5165 config.yaml\x3002", L"Could not write config.yaml.") \
+    T(TitleSaveFailed, L"\x4fdd\x5b58\x5931\x8d25", L"Save failed")
+
+enum class TextId {
+#define WINGLASS_DECLARE_TEXT(id, zh, en) id,
+    WINGLASS_EDITOR_TEXTS(WINGLASS_DECLARE_TEXT)
+#undef WINGLASS_DECLARE_TEXT
+};
+
+struct TextEntry {
+    const wchar_t* chinese;
+    const wchar_t* english;
+};
+
+const TextEntry kTexts[] = {
+#define WINGLASS_DEFINE_TEXT(id, zh, en) { zh, en },
+    WINGLASS_EDITOR_TEXTS(WINGLASS_DEFINE_TEXT)
+#undef WINGLASS_DEFINE_TEXT
+};
+
+enum class UiLanguage { Chinese, English };
+UiLanguage g_language = UiLanguage::Chinese;
+
+// An explicit tag wins; an empty or unknown one falls back to the Windows
+// display language, so "auto" needs no special case.
+void SelectLanguage(const std::wstring& tag) {
+    if (tag == L"en" || tag == L"en-US" || tag == L"english") { g_language = UiLanguage::English; return; }
+    if (tag == L"zh" || tag == L"zh-CN" || tag == L"chinese") { g_language = UiLanguage::Chinese; return; }
+    g_language = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE) ? UiLanguage::Chinese : UiLanguage::English;
+}
+
+// Mirrors the resident process: --lang= on the command line beats the
+// `ui_language` configuration value, which in turn beats the Windows display
+// language. "auto" and unknown tags need no special case because
+// SelectLanguage() already treats them as "follow the system".
+void ResolveUiLanguage(const wchar_t* commandLine, const std::wstring& configLanguage) {
+    std::wstring tag;
+    if (commandLine) {
+        const wchar_t* flag = wcsstr(commandLine, L"--lang=");
+        if (flag) {
+            for (flag += 7; *flag && *flag != L' ' && *flag != L'"'; ++flag) tag += *flag;
+        }
+    }
+    if (tag.empty()) tag = configLanguage;
+    SelectLanguage(tag);
+}
+
+const wchar_t* Str(TextId id) {
+    const size_t index = static_cast<size_t>(id);
+    if (index >= std::size(kTexts)) return L"";
+    return g_language == UiLanguage::English ? kTexts[index].english : kTexts[index].chinese;
+}
+
+// Builds a formatted display string. Used where a status line or a message box
+// mixes a table row with runtime data.
+std::wstring FormatText(const wchar_t* format, ...) {
+    va_list args;
+    va_start(args, format);
+    const int length = _vscwprintf(format, args);
+    va_end(args);
+    if (length <= 0) return format;
+    std::wstring text(static_cast<size_t>(length), L'\0');
+    va_start(args, format);
+    _vsnwprintf_s(text.data(), text.size() + 1, _TRUNCATE, format, args);
+    va_end(args);
+    return text;
+}
 
 struct Color {
     int r = 53;
@@ -82,6 +242,9 @@ struct EditorConfig {
     std::vector<std::wstring> blacklistProcesses;
     std::vector<std::wstring> blacklistClasses;
     std::vector<AppRule> appRules;
+    // "auto" / "zh" / "en", matching the resident process. The editor writes
+    // the key back on every save, so it has to live in the model.
+    std::wstring uiLanguage = L"auto";
 };
 
 enum ControlId {
@@ -97,7 +260,8 @@ enum ControlId {
     // Appended after the original ids so the values above keep their meaning.
     // These are only ever used inside this process.
     IDC_TABS,
-    IDC_APP_MATCH_CLASS, IDC_APP_MATCH_TITLE, IDC_APP_MATCH_AUMID
+    IDC_APP_MATCH_CLASS, IDC_APP_MATCH_TITLE, IDC_APP_MATCH_AUMID,
+    IDC_UI_LANGUAGE
 };
 
 struct Controls {
@@ -143,17 +307,26 @@ struct Controls {
     HWND appMatchClass = nullptr;
     HWND appMatchTitle = nullptr;
     HWND appMatchAumid = nullptr;
+    HWND uiLanguage = nullptr;
 } g_controls;
 
 HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
 HFONT g_font = nullptr;
+// Set by --ui-self-test so the hidden diagnostic window can be built without
+// a load-failure message box blocking a console run.
+bool g_suppressDialogs = false;
 // The editor is split into one page per concern so that each page owns the
 // whole window. The appearance groups, the rule editor and the blacklist lists
 // used to compete for the same fixed vertical space, which left no room for the
 // matcher fields and would clip longer labels in another language.
 enum class EditorPage { Global = 0, Applications = 1, Blacklist = 2 };
 constexpr int kEditorPageCount = 3;
+// Width of every label in an appearance group. The edit fields start at
+// x + 212, and the longest English label ("Exclude during full-screen video",
+// 192px at the default GUI font) has to fit in front of them, so the labels
+// get 194px. --ui-self-test measures every translation against this.
+constexpr int kGroupLabelWidth = 194;
 std::vector<HWND> g_pageControls[kEditorPageCount];
 int g_activePage = 0;
 // Cleared while a control that must stay visible on every page is created.
@@ -255,6 +428,17 @@ std::wstring Unquote(const std::wstring& value) {
         return trimmed.substr(1, trimmed.size() - 2);
     }
     return trimmed;
+}
+
+// ui_language is a short ASCII tag; fold the case so "ZH" and "zh" stay the
+// same value on a round trip.
+std::wstring LowerTag(const std::wstring& value) {
+    std::wstring result = value;
+    for (size_t i = 0; i < result.size(); ++i) {
+        const wchar_t c = result[i];
+        if (c >= L'A' && c <= L'Z') result[i] = static_cast<wchar_t>(c - L'A' + L'a');
+    }
+    return result;
 }
 
 std::wstring StripYamlComment(const std::wstring& line) {
@@ -430,6 +614,12 @@ bool LoadYaml(EditorConfig& result, const std::wstring& text) {
         }
         if (section == Section::Global) {
             if (key == L"enabled") result.enabled = ParseBool(value, result.enabled);
+            else if (key == L"ui_language") {
+                // Keep the raw tag in the model so the editor can write back
+                // exactly what the user configured; "auto" is the default.
+                const std::wstring tag = LowerTag(Unquote(value));
+                result.uiLanguage = tag.empty() ? L"auto" : tag;
+            }
             else if (key == L"focused") section = Section::Focused;
             else if (key == L"unfocused") section = Section::Unfocused;
             continue;
@@ -483,6 +673,10 @@ bool LoadIniFallback(EditorConfig& result, const std::wstring& text) {
         const std::wstring value = Trim(line.substr(equals + 1));
         if (section == L"Global") {
             if (key == L"enabled") result.enabled = ParseBool(value, result.enabled);
+            else if (key == L"ui_language") {
+                const std::wstring tag = LowerTag(value);
+                result.uiLanguage = tag.empty() ? L"auto" : tag;
+            }
             else if (key == L"active_opacity") result.focused.targetOpacity = ParseDouble(value, result.focused.targetOpacity, 0.05, 1.0);
             else if (key == L"inactive_opacity") result.unfocused.targetOpacity = ParseDouble(value, result.unfocused.targetOpacity, 0.05, 1.0);
             else if (key == L"active_acrylic") result.focused.glass = ParseBool(value, result.focused.glass);
@@ -576,6 +770,7 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
     for (const auto& className : config.blacklistClasses) output << L"  - class_name: \"" << className << L"\"\n";
     output << L"\nglobal:\n"
            << L"  enabled: " << (config.enabled ? L"true" : L"false") << L"\n"
+           << L"  ui_language: " << (config.uiLanguage.empty() ? L"auto" : config.uiLanguage.c_str()) << L"\n"
            << AppearanceYaml(config.focused, L"focused")
            << AppearanceYaml(config.unfocused, L"unfocused");
     if (!config.appRules.empty()) {
@@ -653,23 +848,23 @@ HWND MakeEdit(int id, int x, int y, int width = 100) {
     return MakeControl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, id, x, y, width, 24);
 }
 
-void MakeAppearanceGroup(const wchar_t* title, int baseId, int x, int y) {
-    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 248);
-    MakeLabel(L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", x + 16, y + 32);
-    MakeLabel(L"\x542f\x7528\x6bdb\x73bb\x7483", x + 16, y + 62);
-    MakeLabel(L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", x + 16, y + 92);
-    MakeLabel(L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", x + 16, y + 122);
-    MakeLabel(L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", x + 16, y + 152);
-    MakeLabel(L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", x + 16, y + 182);
-    MakeLabel(L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", x + 16, y + 212);
+void MakeAppearanceGroup(TextId titleId, int baseId, int x, int y) {
+    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 248);
+    MakeLabel(Str(TextId::LabelTargetOpacity), x + 16, y + 32, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelEnableGlass), x + 16, y + 62, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassColor), x + 16, y + 92, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 122, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 152, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 182, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 212, kGroupLabelWidth);
 
-    HWND target = MakeEdit(baseId, x + 205, y + 29);
-    HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 205, y + 59, 22, 22);
-    HWND color = MakeEdit(baseId + 2, x + 205, y + 89, 125);
-    HWND glassOpacity = MakeEdit(baseId + 3, x + 205, y + 119);
-    HWND tint = MakeEdit(baseId + 4, x + 205, y + 149);
-    HWND animation = MakeEdit(baseId + 5, x + 205, y + 179, 125);
-    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 205, y + 209, 22, 22);
+    HWND target = MakeEdit(baseId, x + 212, y + 29);
+    HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 212, y + 59, 22, 22);
+    HWND color = MakeEdit(baseId + 2, x + 212, y + 89, 125);
+    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 119);
+    HWND tint = MakeEdit(baseId + 4, x + 212, y + 149);
+    HWND animation = MakeEdit(baseId + 5, x + 212, y + 179, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 209, 22, 22);
     if (baseId == IDC_F_TARGET) {
         g_controls.fTarget = target; g_controls.fGlass = glass; g_controls.fColor = color;
         g_controls.fGlassOpacity = glassOpacity; g_controls.fTint = tint; g_controls.fAnimation = animation; g_controls.fFullscreen = fullscreen;
@@ -679,23 +874,23 @@ void MakeAppearanceGroup(const wchar_t* title, int baseId, int x, int y) {
     }
 }
 
-void MakeAppAppearanceGroup(const wchar_t* title, int baseId, int x, int y, bool focused) {
-    MakeControl(L"BUTTON", title, BS_GROUPBOX, 0, x, y, 365, 248);
-    MakeLabel(L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", x + 16, y + 32);
-    MakeLabel(L"\x542f\x7528\x6bdb\x73bb\x7483", x + 16, y + 62);
-    MakeLabel(L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", x + 16, y + 92);
-    MakeLabel(L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", x + 16, y + 122);
-    MakeLabel(L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", x + 16, y + 152);
-    MakeLabel(L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", x + 16, y + 182);
-    MakeLabel(L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", x + 16, y + 212);
+void MakeAppAppearanceGroup(TextId titleId, int baseId, int x, int y, bool focused) {
+    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 248);
+    MakeLabel(Str(TextId::LabelTargetOpacity), x + 16, y + 32, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelEnableGlass), x + 16, y + 62, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassColor), x + 16, y + 92, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 122, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 152, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 182, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 212, kGroupLabelWidth);
 
-    HWND target = MakeEdit(baseId, x + 205, y + 29);
-    HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 205, y + 59, 22, 22);
-    HWND color = MakeEdit(baseId + 2, x + 205, y + 89, 125);
-    HWND glassOpacity = MakeEdit(baseId + 3, x + 205, y + 119);
-    HWND tint = MakeEdit(baseId + 4, x + 205, y + 149);
-    HWND animation = MakeEdit(baseId + 5, x + 205, y + 179, 125);
-    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 205, y + 209, 22, 22);
+    HWND target = MakeEdit(baseId, x + 212, y + 29);
+    HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 212, y + 59, 22, 22);
+    HWND color = MakeEdit(baseId + 2, x + 212, y + 89, 125);
+    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 119);
+    HWND tint = MakeEdit(baseId + 4, x + 212, y + 149);
+    HWND animation = MakeEdit(baseId + 5, x + 212, y + 179, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 209, 22, 22);
     if (focused) {
         g_controls.appFTarget = target; g_controls.appFGlass = glass; g_controls.appFColor = color;
         g_controls.appFGlassOpacity = glassOpacity; g_controls.appFTint = tint; g_controls.appFAnimation = animation; g_controls.appFFullscreen = fullscreen;
@@ -779,7 +974,7 @@ bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
         appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!ParseColor(ControlText(color), appearance.color)) {
             if (showErrors) {
-                MessageBoxW(g_window, L"\x989c\x8272\x5fc5\x987b\x4f7f\x7528 #RRGGBB \x683c\x5f0f\x3002", L"\x989c\x8272\x65e0\x6548", MB_ICONWARNING);
+                MessageBoxW(g_window, Str(TextId::MsgColorFormat), Str(TextId::TitleColorInvalid), MB_ICONWARNING);
                 SetFocus(color);
             }
             return false;
@@ -1054,7 +1249,7 @@ void SetSelectedProcess(const std::wstring& process, const std::wstring& display
     g_selectedProcessDisplay = display;
     const bool hasSelection = !g_selectedProcess.empty() || !g_selectedAumid.empty();
     if (g_controls.selectedProcess) {
-        SetControlText(g_controls.selectedProcess, hasSelection ? g_selectedProcessDisplay : L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b");
+        SetControlText(g_controls.selectedProcess, hasSelection ? g_selectedProcessDisplay : Str(TextId::StatusNoProcessSelected));
     }
     // The blacklist matches on process and window class, and a package identity
     // has neither, so only the per-application rule path can use it.
@@ -1069,17 +1264,17 @@ LRESULT CALLBACK ProcessPickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         // Use a real menu instead of a decorative label so the familiar
         // "File" affordance remains useful: it refreshes a stale snapshot.
         HMENU fileMenu = CreatePopupMenu();
-        AppendMenuW(fileMenu, MF_STRING, IDC_PICKER_REFRESH, L"\x5237\x65b0\x5217\x8868");
+        AppendMenuW(fileMenu, MF_STRING, IDC_PICKER_REFRESH, Str(TextId::PickerMenuRefresh));
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(fileMenu, MF_STRING, IDC_PICKER_CANCEL, L"\x5173\x95ed");
+        AppendMenuW(fileMenu, MF_STRING, IDC_PICKER_CANCEL, Str(TextId::ButtonClose));
         HMENU menuBar = CreateMenu();
-        AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"\x6587\x4ef6");
+        AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), Str(TextId::PickerMenuFile));
         SetMenu(hwnd, menuBar);
 
         g_pickerTabs = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             10, 8, 580, 29, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PICKER_TABS)), g_instance, nullptr);
         if (g_pickerTabs && g_font) SendMessageW(g_pickerTabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
-        const wchar_t* pages[] = { L"\x5e94\x7528\x7a0b\x5e8f", L"\x8fdb\x7a0b", L"\x7a97\x53e3", L"\x5546\x5e97\x5e94\x7528" };
+        const wchar_t* pages[] = { Str(TextId::PickerTabApplications), Str(TextId::PickerTabProcesses), Str(TextId::PickerTabWindows), Str(TextId::PickerTabPackages) };
         for (int index = 0; index < static_cast<int>(std::size(pages)); ++index) {
             TCITEMW page{};
             page.mask = TCIF_TEXT;
@@ -1094,9 +1289,9 @@ LRESULT CALLBACK ProcessPickerProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         LVCOLUMNW column{};
         column.mask = LVCF_TEXT | LVCF_WIDTH;
         column.pszText = const_cast<wchar_t*>(L""); column.cx = 555; ListView_InsertColumn(g_pickerList, 0, &column);
-        g_pickerOpen = CreateWindowExW(0, L"BUTTON", L"\x6253\x5f00", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        g_pickerOpen = CreateWindowExW(0, L"BUTTON", Str(TextId::PickerButtonOpen), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             330, 512, 95, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PICKER_OPEN)), g_instance, nullptr);
-        HWND cancel = CreateWindowExW(0, L"BUTTON", L"\x53d6\x6d88", WS_CHILD | WS_VISIBLE,
+        HWND cancel = CreateWindowExW(0, L"BUTTON", Str(TextId::PickerButtonCancel), WS_CHILD | WS_VISIBLE,
             440, 512, 95, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PICKER_CANCEL)), g_instance, nullptr);
         if (g_pickerOpen && g_font) SendMessageW(g_pickerOpen, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
         if (cancel && g_font) SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
@@ -1170,7 +1365,7 @@ void OpenProcessPicker() {
     g_pickerChosenProcess.clear();
     g_pickerChosenDisplay.clear();
     g_pickerChosenAumid.clear();
-    HWND picker = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WinGlassProcessPicker", L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b",
+    HWND picker = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WinGlassProcessPicker", Str(TextId::PickerTitle),
         WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 610, 605,
         g_window, nullptr, g_instance, nullptr);
     if (!picker) return;
@@ -1187,12 +1382,28 @@ void OpenProcessPicker() {
     SetForegroundWindow(g_window);
     if (!g_pickerChosenProcess.empty() || !g_pickerChosenAumid.empty()) {
         SetSelectedProcess(g_pickerChosenProcess, g_pickerChosenDisplay, g_pickerChosenAumid);
-        SetStatus(L"\x5df2\x9009\x62e9 " + g_pickerChosenDisplay + L"\x3002");
+        SetStatus(FormatText(Str(TextId::StatusSelectedFormat), g_pickerChosenDisplay.c_str()));
     }
+}
+
+// Fills the three-item language combo and selects the value stored in the
+// model. The items are localized, so this runs after the controls exist.
+void PopulateUiLanguageCombo() {
+    if (!g_controls.uiLanguage) return;
+    SendMessageW(g_controls.uiLanguage, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_controls.uiLanguage, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(Str(TextId::ComboFollowSystem)));
+    SendMessageW(g_controls.uiLanguage, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(Str(TextId::ComboChinese)));
+    SendMessageW(g_controls.uiLanguage, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(Str(TextId::ComboEnglish)));
+    const std::wstring& tag = g_config.uiLanguage;
+    const int index = (tag == L"zh" || tag == L"chinese" || tag == L"zh-CN") ? 1
+                    : (tag == L"en" || tag == L"english" || tag == L"en-US") ? 2
+                    : 0;
+    SendMessageW(g_controls.uiLanguage, CB_SETCURSEL, index, 0);
 }
 
 void LoadToControls() {
     SendMessageW(g_controls.enabled, BM_SETCHECK, g_config.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    PopulateUiLanguageCombo();
     PutAppearance(g_config.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
                   g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     PutAppearance(g_config.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
@@ -1221,7 +1432,7 @@ bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
     if (!ParseColor(ControlText(color), appearance.color)) {
         const int page = PageOfControl(color);
         if (page >= 0) ActivatePage(page);
-        MessageBoxW(g_window, L"\x989c\x8272\x5fc5\x987b\x4f7f\x7528 #RRGGBB \x683c\x5f0f\x3002", L"\x989c\x8272\x65e0\x6548", MB_ICONWARNING);
+        MessageBoxW(g_window, Str(TextId::MsgColorFormat), Str(TextId::TitleColorInvalid), MB_ICONWARNING);
         SetFocus(color);
         return false;
     }
@@ -1341,8 +1552,8 @@ uint8_t ExtractMaskedChannel(uint32_t pixel, uint32_t mask) {
 // BGRA8 buffer. Screenshot tools overwhelmingly use 32 bpp BI_RGB, but 24 bpp,
 // 16 bpp and 8 bpp palettes are handled as well so older tools keep working.
 bool DecodeDib(const uint8_t* data, size_t size, ClipboardBitmap& out, std::wstring& error) {
-    const wchar_t* kInvalid = L"\x526a\x8d34\x677f\x56fe\x7247\x6570\x636e\x4e0d\x5b8c\x6574\x6216\x5df2\x635f\x574f\x3002";
-    const wchar_t* kUnsupported = L"\x526a\x8d34\x677f\x56fe\x7247\x7684\x4f4d\x6df1\x4e0d\x53d7\x652f\x6301\x3002";
+    const wchar_t* kInvalid = Str(TextId::ErrClipboardImageCorrupt);
+    const wchar_t* kUnsupported = Str(TextId::ErrClipboardImageDepth);
     if (size < sizeof(BITMAPINFOHEADER)) { error = kInvalid; return false; }
     const auto* header = reinterpret_cast<const BITMAPINFOHEADER*>(data);
     if (header->biSize < sizeof(BITMAPINFOHEADER) || header->biSize > size) { error = kInvalid; return false; }
@@ -1471,7 +1682,7 @@ bool DecodePng(const uint8_t* data, size_t size, ClipboardBitmap& out, std::wstr
     HRESULT result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                      IID_PPV_ARGS(&factory));
     if (FAILED(result) || !factory) {
-        error = L"\x65e0\x6cd5\x521d\x59cb\x5316\x56fe\x7247\x89e3\x7801\x5668\xff0cPNG \x683c\x5f0f\x4e0d\x53ef\x7528\x3002";
+        error = Str(TextId::ErrPngDecoderUnavailable);
         return false;
     }
     IWICStream* stream = nullptr;
@@ -1504,7 +1715,7 @@ bool DecodePng(const uint8_t* data, size_t size, ClipboardBitmap& out, std::wstr
     if (decoder) decoder->Release();
     if (stream) stream->Release();
     factory->Release();
-    if (!decoded && error.empty()) error = L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002";
+    if (!decoded && error.empty()) error = Str(TextId::ErrClipboardImageDecode);
     return decoded;
 }
 
@@ -1537,10 +1748,10 @@ bool ReadClipboardImage(HWND owner, ClipboardBitmap& out, std::wstring& error) {
         if (DecodePng(bytes.data(), bytes.size(), out, decodeError)) return true;
     }
     if (!dibAvailable && !pngAvailable) {
-        error = L"\x526a\x8d34\x677f\x91cc\x6ca1\x6709\x56fe\x7247\x3002\x8bf7\x5148\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\x3002";
+        error = Str(TextId::ErrClipboardNoImage);
         return false;
     }
-    error = decodeError.empty() ? L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002" : decodeError;
+    error = decodeError.empty() ? Str(TextId::ErrClipboardImageDecode) : decodeError;
     return false;
 }
 
@@ -1786,17 +1997,16 @@ void RefreshPaletteFromClipboard(HWND hwnd) {
         g_paletteBitmap = std::move(bitmap);
         g_paletteEntries = ExtractPalette(g_paletteBitmap, kPaletteSwatchCount, g_paletteSampleCount);
         if (g_paletteEntries.empty()) {
-            info = L"\x526a\x8d34\x677f\x56fe\x7247\x89e3\x7801\x5931\x8d25\x3002";
+            info = Str(TextId::ErrClipboardImageDecode);
             status = info;
         } else {
             const int colours = static_cast<int>(g_paletteEntries.size());
             const int samples = static_cast<int>(std::min<uint64_t>(g_paletteSampleCount, 2000000000ull));
             wchar_t buffer[256]{};
-            swprintf_s(buffer,
-                       L"\x56fe\x7247 %d x %d\xff0c\x91c7\x6837 %d \x50cf\x7d20\xff0c\x5171\x63d0\x53d6 %d \x4e2a\x989c\x8272\x3002",
+            swprintf_s(buffer, Str(TextId::PaletteInfoFormat),
                        g_paletteBitmap.width, g_paletteBitmap.height, samples, colours);
             info = buffer;
-            status = L"\x8bf7\x5148\x5728\x4e0a\x65b9\x9009\x62e9\x4e00\x4e2a\x989c\x8272\x3002";
+            status = Str(TextId::StatusSelectColor);
         }
     } else {
         info = error;
@@ -1811,7 +2021,7 @@ void RefreshPaletteFromClipboard(HWND hwnd) {
 
 void ApplyPaletteColour(HWND hwnd, bool toAllRules) {
     if (g_paletteSelected < 0 || g_paletteSelected >= static_cast<int>(g_paletteEntries.size())) {
-        SetControlText(g_paletteStatus, L"\x8bf7\x5148\x5728\x4e0a\x65b9\x9009\x62e9\x4e00\x4e2a\x989c\x8272\x3002");
+        SetControlText(g_paletteStatus, Str(TextId::StatusSelectColor));
         return;
     }
     const Color color = g_paletteEntries[static_cast<size_t>(g_paletteSelected)].color;
@@ -1820,10 +2030,8 @@ void ApplyPaletteColour(HWND hwnd, bool toAllRules) {
 
     if (toAllRules && ruleCount > 0) {
         wchar_t question[512]{};
-        swprintf_s(question,
-                   L"\x5c06\x628a %s \x5e94\x7528\x5230\x5168\x90e8 %d \x6761\x4e13\x5c5e\x89c4\x5219\xff0c\x8986\x76d6\x6bcf\x6761\x89c4\x5219\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x662f\x5426\x7ee7\x7eed\xff1f",
-                   text.c_str(), ruleCount);
-        if (MessageBoxW(hwnd, question, L"\x786e\x8ba4\x8986\x76d6", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
+        swprintf_s(question, Str(TextId::PaletteApplyAllConfirmFormat), text.c_str(), ruleCount);
+        if (MessageBoxW(hwnd, question, Str(TextId::TitleConfirmOverwrite), MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
     }
 
     // Unsaved edits in the rule form must survive, otherwise writing the colour
@@ -1844,13 +2052,9 @@ void ApplyPaletteColour(HWND hwnd, bool toAllRules) {
         if (g_selectedAppRule >= 0 && g_selectedAppRule < ruleCount) {
             PutAppRule(g_config.appRules[static_cast<size_t>(g_selectedAppRule)]);
         }
-        swprintf_s(buffer,
-                   L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x548c %d \x6761\x4e13\x5c5e\x89c4\x5219\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002",
-                   text.c_str(), ruleCount);
+        swprintf_s(buffer, Str(TextId::PaletteAppliedAllFormat), text.c_str(), ruleCount);
     } else {
-        swprintf_s(buffer,
-                   L"\x5df2\x628a %s \x5e94\x7528\x5230\x5168\x5c40\x7684\x805a\x7126\x8272\x548c\x5931\x7126\x8272\x3002\x70b9\x201c\x4fdd\x5b58\x5e76\x5e94\x7528\x201d\x5199\x5165 config.yaml\x3002",
-                   text.c_str());
+        swprintf_s(buffer, Str(TextId::PaletteAppliedGlobalFormat), text.c_str());
     }
     const std::wstring message = buffer;
     SetControlText(g_paletteStatus, message);
@@ -1858,13 +2062,9 @@ void ApplyPaletteColour(HWND hwnd, bool toAllRules) {
 }
 
 void CreatePaletteControls(HWND hwnd) {
-    MakePaletteControl(hwnd, L"STATIC",
-                       L"\x5148\x7528\x622a\x56fe\x5de5\x5177\x622a\x53d6\x65e0\x56fe\x6807\x684c\x9762\x5e76\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x201c\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f\x201d",
-                       0, 0, 24, 14, 612, 22);
+    MakePaletteControl(hwnd, L"STATIC", Str(TextId::PaletteHelpText), 0, 0, 24, 14, 612, 22);
     g_paletteInfo = MakePaletteControl(hwnd, L"STATIC", L"", SS_LEFT, IDC_PALETTE_INFO, 328, 48, 308, 150);
-    MakePaletteControl(hwnd, L"STATIC",
-                       L"\x51fa\x73b0\x9891\x7387\x6700\x9ad8\x7684\x989c\x8272\xff08\x70b9\x51fb\x9009\x62e9\xff09",
-                       0, 0, 24, 218, 612, 20);
+    MakePaletteControl(hwnd, L"STATIC", Str(TextId::PaletteFrequentColors), 0, 0, 24, 218, 612, 20);
     for (int i = 0; i < kPaletteSwatchCount; ++i) {
         const int column = i % 5;
         const int row = i / 5;
@@ -1873,14 +2073,14 @@ void CreatePaletteControls(HWND hwnd) {
                                                   24 + column * 124, 242 + row * 72, 116, 64);
     }
     g_paletteStatus = MakePaletteControl(hwnd, L"STATIC", L"", SS_LEFT, IDC_PALETTE_STATUS, 24, 386, 612, 20);
-    MakePaletteControl(hwnd, L"BUTTON", L"\x5e94\x7528\x5230\x5168\x5c40", WS_TABSTOP,
-                       IDC_PALETTE_APPLY_GLOBAL, 24, 412, 150, 34);
-    MakePaletteControl(hwnd, L"BUTTON", L"\x5e94\x7528\x5230\x5168\x90e8\x89c4\x5219\xff08\x542b\x4e13\x5c5e\xff09", WS_TABSTOP,
-                       IDC_PALETTE_APPLY_ALL, 184, 412, 220, 34);
-    MakePaletteControl(hwnd, L"BUTTON", L"\x91cd\x65b0\x8bfb\x53d6\x526a\x8d34\x677f", WS_TABSTOP,
-                       IDC_PALETTE_READ, 414, 412, 130, 34);
-    MakePaletteControl(hwnd, L"BUTTON", L"\x5173\x95ed", WS_TABSTOP,
-                       IDC_PALETTE_CLOSE, 554, 412, 82, 34);
+    MakePaletteControl(hwnd, L"BUTTON", Str(TextId::PaletteApplyGlobal), WS_TABSTOP,
+                       IDC_PALETTE_APPLY_GLOBAL, 24, 412, 120, 34);
+    MakePaletteControl(hwnd, L"BUTTON", Str(TextId::PaletteApplyAllRules), WS_TABSTOP,
+                       IDC_PALETTE_APPLY_ALL, 154, 412, 240, 34);
+    MakePaletteControl(hwnd, L"BUTTON", Str(TextId::PaletteReadClipboard), WS_TABSTOP,
+                       IDC_PALETTE_READ, 404, 412, 130, 34);
+    MakePaletteControl(hwnd, L"BUTTON", Str(TextId::ButtonClose), WS_TABSTOP,
+                       IDC_PALETTE_CLOSE, 544, 412, 82, 34);
 }
 
 LRESULT CALLBACK PaletteProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1971,7 +2171,7 @@ void OpenPaletteDialog() {
     const DWORD style = WS_CAPTION | WS_SYSMENU | WS_POPUP;
     AdjustWindowRectEx(&rect, style, FALSE, WS_EX_DLGMODALFRAME);
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WinGlassPaletteDialog",
-                                  L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272", style,
+                                  Str(TextId::PaletteTitle), style,
                                   CW_USEDEFAULT, CW_USEDEFAULT,
                                   rect.right - rect.left, rect.bottom - rect.top,
                                   g_window, nullptr, g_instance, nullptr);
@@ -1992,6 +2192,10 @@ void OpenPaletteDialog() {
 bool SaveFromControls() {
     EditorConfig updated = g_config;
     updated.enabled = SendMessageW(g_controls.enabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    // The combo stores "auto" / "zh" / "en" so the resident process can read
+    // exactly what the user picked, independent of the editor's own language.
+    const int languageIndex = static_cast<int>(SendMessageW(g_controls.uiLanguage, CB_GETCURSEL, 0, 0));
+    updated.uiLanguage = languageIndex == 1 ? L"zh" : languageIndex == 2 ? L"en" : L"auto";
     if (!ReadAppearance(updated.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
                         g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen) ||
         !ReadAppearance(updated.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
@@ -2007,16 +2211,16 @@ bool SaveFromControls() {
         // would look saved and quietly do nothing.
         if (!rule.AnyMatcher()) {
             ActivatePage(static_cast<int>(EditorPage::Applications));
-            MessageBoxW(g_window, L"\x6bcf\x6761\x4e13\x5c5e\x89c4\x5219\x81f3\x5c11\x9700\x8981\x4e00\x4e2a\x5339\x914d\x6761\x4ef6\x3002", L"\x5339\x914d\x6761\x4ef6\x7f3a\x5931", MB_ICONWARNING);
+            MessageBoxW(g_window, Str(TextId::MsgRuleNeedsMatcher), Str(TextId::TitleMatcherMissing), MB_ICONWARNING);
             return false;
         }
     }
     if (!SaveConfigFile(updated, g_configPath)) {
-        MessageBoxW(g_window, L"Could not write config.yaml.", L"Save failed", MB_ICONERROR);
+        MessageBoxW(g_window, Str(TextId::ErrWriteConfig), Str(TextId::TitleSaveFailed), MB_ICONERROR);
         return false;
     }
     g_config = std::move(updated);
-    SetStatus(L"\x5df2\x4fdd\x5b58\x3002\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x91cd\x65b0\x52a0\x8f7d\x3002");
+    SetStatus(Str(TextId::StatusSaved));
     return true;
 }
 
@@ -2026,8 +2230,8 @@ void AddSelectedProcessToBlacklist() {
         // A package identity cannot join the name blacklist: those windows
         // belong to the shared ApplicationFrameHost.exe host, so the only way
         // to exempt one is a rule that matches its package identity.
-        SetStatus(g_selectedAumid.empty() ? L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002"
-                                          : L"\x5546\x5e97\x5e94\x7528\x8bf7\x7528\x4e13\x5c5e\x89c4\x5219\x6309\x5305\x6807\x8bc6\x5339\x914d\x3002");
+        SetStatus(g_selectedAumid.empty() ? Str(TextId::StatusSelectProcess)
+                                          : Str(TextId::StatusStoreAppUseRule));
         return;
     }
     // Incorporate any manual edits in the blacklist box before adding the
@@ -2035,14 +2239,14 @@ void AddSelectedProcessToBlacklist() {
     g_config.blacklistProcesses = ReadLines(g_controls.blacklistProcesses);
     AddUnique(g_config.blacklistProcesses, process);
     SetControlText(g_controls.blacklistProcesses, JoinLines(g_config.blacklistProcesses));
-    if (SaveFromControls()) SetStatus(process + L" \x5df2\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002");
+    if (SaveFromControls()) SetStatus(FormatText(Str(TextId::StatusAddedBlacklistFormat), process.c_str()));
 }
 
 void AddSelectedProcessRule() {
     const std::wstring process = g_selectedProcess;
     const std::wstring aumid = g_selectedAumid;
     if (process.empty() && aumid.empty()) {
-        SetStatus(L"\x8bf7\x5148\x9009\x62e9\x4e00\x4e2a\x8fd0\x884c\x8fdb\x7a0b\x3002");
+        SetStatus(Str(TextId::StatusSelectProcess));
         return;
     }
     // A Store application is identified by its package identity; a desktop
@@ -2056,7 +2260,7 @@ void AddSelectedProcessRule() {
             _wcsicmp(existing.aumid.c_str(), aumid.c_str()) == 0) {
             g_selectedAppRule = static_cast<int>(i);
             PopulateAppRuleList();
-            SetStatus(identity + L" \x5df2\x5b58\x5728\x4e13\x5c5e\x89c4\x5219\x3002");
+            SetStatus(FormatText(Str(TextId::StatusRuleExistsFormat), identity.c_str()));
             return;
         }
     }
@@ -2074,7 +2278,7 @@ void AddSelectedProcessRule() {
     g_config.appRules.push_back(std::move(rule));
     g_selectedAppRule = static_cast<int>(g_config.appRules.size() - 1);
     PopulateAppRuleList();
-    if (SaveFromControls()) SetStatus(identity + L" \x5df2\x521b\x5efa\x4e13\x5c5e\x89c4\x5219\x5e76\x6c38\x4e45\x4fdd\x5b58\x3002");
+    if (SaveFromControls()) SetStatus(FormatText(Str(TextId::StatusRuleCreatedFormat), identity.c_str()));
 }
 
 void RemoveSelectedAppRule() {
@@ -2084,7 +2288,7 @@ void RemoveSelectedAppRule() {
     g_config.appRules.erase(g_config.appRules.begin() + g_selectedAppRule);
     if (g_selectedAppRule >= static_cast<int>(g_config.appRules.size())) g_selectedAppRule = static_cast<int>(g_config.appRules.size()) - 1;
     PopulateAppRuleList();
-    if (SaveFromControls()) SetStatus(process + L" \x7684\x4e13\x5c5e\x89c4\x5219\x5df2\x5220\x9664\x5e76\x4fdd\x5b58\x3002");
+    if (SaveFromControls()) SetStatus(FormatText(Str(TextId::StatusRuleRemovedFormat), process.c_str()));
 }
 
 void SelectAppRule(int selected) {
@@ -2099,13 +2303,17 @@ void SelectAppRule(int selected) {
 void ReloadFromDisk() {
     EditorConfig loaded;
     if (!LoadConfigFile(loaded, g_configPath)) {
-        MessageBoxW(g_window, L"\x65e0\x6cd5\x8bfb\x53d6 config.yaml \x6216 config.ini\x3002", L"\x52a0\x8f7d\x5931\x8d25", MB_ICONERROR);
+        // The ui-self-test builds a hidden window purely to measure control
+        // widths; a message box there would hang a console run.
+        if (!g_suppressDialogs) {
+            MessageBoxW(g_window, Str(TextId::ErrLoadConfig), Str(TextId::TitleLoadFailed), MB_ICONERROR);
+        }
         return;
     }
     g_config = std::move(loaded);
     g_originalText = ReadAll(g_configPath);
     LoadToControls();
-    SetStatus(L"\x914d\x7f6e\x5df2\x91cd\x65b0\x52a0\x8f7d\x3002");
+    SetStatus(Str(TextId::StatusConfigReloaded));
 }
 
 void OpenConfigFolder() {
@@ -2123,9 +2331,9 @@ void CreateControls() {
         TCITEMW item{};
         item.mask = TCIF_TEXT;
         const wchar_t* titles[kEditorPageCount] = {
-            L"\x5168\x5c40",              // Global
-            L"\x4e13\x5c5e\x89c4\x5219",  // Applications
-            L"\x9ed1\x540d\x5355"         // Blacklist
+            Str(TextId::TabGlobal),
+            Str(TextId::TabApplications),
+            Str(TextId::TabBlacklist)
         };
         for (int i = 0; i < kEditorPageCount; ++i) {
             item.pszText = const_cast<wchar_t*>(titles[i]);
@@ -2135,68 +2343,73 @@ void CreateControls() {
     g_registerPageControls = true;
 
     g_activePage = static_cast<int>(EditorPage::Global);
-    g_controls.enabled = MakeControl(L"BUTTON", L"\x5168\x5c40\x542f\x7528 WinGlass", BS_AUTOCHECKBOX,
+    g_controls.enabled = MakeControl(L"BUTTON", Str(TextId::CheckboxEnable), BS_AUTOCHECKBOX,
                                      IDC_ENABLED, 24, 60, 300, 24);
     // Experimental wallpaper helper: the palette dialog reads a screenshot
     // from the clipboard, so nothing here depends on where the wallpaper comes
     // from (plain image, live wallpaper, slideshow, ...).
-    MakeControl(L"BUTTON", L"\x4ece\x526a\x8d34\x677f\x63d0\x53d6\x914d\x8272\xff08\x5b9e\x9a8c\xff09", 0,
-                IDC_PALETTE_OPEN, 24, 96, 220, 30);
-    MakeLabel(L"\x622a\x56fe\x540e\x590d\x5236\x5230\x526a\x8d34\x677f\xff0c\x518d\x70b9\x6b64\x5206\x6790", 258, 102, 500);
-    MakeAppearanceGroup(L"\x805a\x7126\x7a97\x53e3", IDC_F_TARGET, 20, 145);
-    MakeAppearanceGroup(L"\x5931\x6d3b\x7a97\x53e3", IDC_U_TARGET, 405, 145);
+    MakeControl(L"BUTTON", Str(TextId::ButtonExtractPalette), 0,
+                IDC_PALETTE_OPEN, 24, 96, 280, 30);
+    MakeLabel(Str(TextId::LabelPaletteHint), 316, 102, 465);
+    MakeAppearanceGroup(TextId::GroupFocusedWindow, IDC_F_TARGET, 20, 145);
+    MakeAppearanceGroup(TextId::GroupUnfocusedWindow, IDC_U_TARGET, 405, 145);
+    // The interface language stays on the Global page because it describes the
+    // whole editor. "Follow system" is the default and maps to `auto` on disk.
+    MakeLabel(Str(TextId::LabelInterfaceLanguage), 24, 420, 200);
+    g_controls.uiLanguage = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                        IDC_UI_LANGUAGE, 24, 444, 220, 200);
 
     g_activePage = static_cast<int>(EditorPage::Applications);
-    MakeControl(L"BUTTON", L"\x8fd0\x884c\x8fdb\x7a0b\x4e0e\x4e13\x5c5e\x89c4\x5219", BS_GROUPBOX, 0, 20, 55, 750, 120);
-    MakeLabel(L"\x5df2\x9009\x62e9\x8fdb\x7a0b\xff1a", 35, 85, 90);
-    g_controls.selectedProcess = MakeLabel(L"\x5c1a\x672a\x9009\x62e9\x8fdb\x7a0b", 125, 85, 420);
-    g_controls.pickProcess = MakeControl(L"BUTTON", L"\x9009\x62e9\x8fd0\x884c\x8fdb\x7a0b...", 0,
+    MakeControl(L"BUTTON", Str(TextId::GroupRunningProcesses), BS_GROUPBOX, 0, 20, 55, 750, 120);
+    MakeLabel(Str(TextId::LabelSelectedProcess), 35, 85, 110);
+    g_controls.selectedProcess = MakeLabel(Str(TextId::StatusNoProcessSelected), 150, 85, 395);
+    g_controls.pickProcess = MakeControl(L"BUTTON", Str(TextId::ButtonChooseProcess), 0,
                                          IDC_PICK_PROCESS, 565, 80, 165, 28);
-    g_controls.addProcessBlacklist = MakeControl(L"BUTTON", L"\x52a0\x5165\x9ed1\x540d\x5355\x5e76\x4fdd\x5b58", 0,
+    g_controls.addProcessBlacklist = MakeControl(L"BUTTON", Str(TextId::ButtonAddBlacklist), 0,
                                                   IDC_ADD_PROCESS_BLACKLIST, 350, 115, 170, 25);
-    g_controls.addAppRule = MakeControl(L"BUTTON", L"\x521b\x5efa\x4e13\x5c5e\x89c4\x5219", 0,
+    g_controls.addAppRule = MakeControl(L"BUTTON", Str(TextId::ButtonCreateRule), 0,
                                          IDC_ADD_APP_RULE, 530, 115, 130, 25);
-    MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 148, 100);
+    MakeLabel(Str(TextId::LabelExistingRules), 35, 148, 135);
     g_controls.appRules = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                      IDC_APP_RULES, 125, 145, 360, 220);
-    g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0,
+                                      IDC_APP_RULES, 175, 145, 315, 220);
+    g_controls.removeAppRule = MakeControl(L"BUTTON", Str(TextId::ButtonRemoveRule), 0,
                                             IDC_REMOVE_APP_RULE, 500, 145, 120, 25);
     SetSelectedProcess(L"", L"");
 
     // Match conditions. Any field left empty simply does not take part, so a
     // rule can be as broad as one title fragment or as narrow as a package
     // identity plus a window class.
-    MakeControl(L"BUTTON", L"\x5339\x914d\x6761\x4ef6\xff08\x7a7a\x5219\x4e0d\x53c2\x4e0e\x5339\x914d\xff09",
+    MakeControl(L"BUTTON", Str(TextId::GroupMatchConditions),
                 BS_GROUPBOX, 0, 20, 190, 750, 150);
-    MakeLabel(L"\x7a97\x53e3\x7c7b\x540d", 35, 226, 120);
-    g_controls.appMatchClass = MakeEdit(IDC_APP_MATCH_CLASS, 165, 222, 240);
-    MakeLabel(L"\x6807\x9898\x5305\x542b", 35, 258, 120);
-    g_controls.appMatchTitle = MakeEdit(IDC_APP_MATCH_TITLE, 165, 254, 460);
-    MakeLabel(L"\x5e94\x7528\x5305\x6807\x8bc6\xff08" L"AUMID\xff09", 35, 290, 120);
-    g_controls.appMatchAumid = MakeEdit(IDC_APP_MATCH_AUMID, 165, 286, 560);
-    MakeLabel(L"\x5546\x5e97\x5e94\x7528\x7684\x5305\x6807\x8bc6\xff0c\x4f8b\xff1a Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", 35, 316, 700);
+    MakeLabel(Str(TextId::LabelMatchClass), 35, 226, 150);
+    g_controls.appMatchClass = MakeEdit(IDC_APP_MATCH_CLASS, 195, 222, 240);
+    MakeLabel(Str(TextId::LabelMatchTitle), 35, 258, 150);
+    g_controls.appMatchTitle = MakeEdit(IDC_APP_MATCH_TITLE, 195, 254, 460);
+    MakeLabel(Str(TextId::LabelMatchAumid), 35, 290, 150);
+    g_controls.appMatchAumid = MakeEdit(IDC_APP_MATCH_AUMID, 195, 286, 530);
+    MakeLabel(Str(TextId::LabelAumidExample), 35, 316, 700);
 
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x805a\x7126\x7a97\x53e3", IDC_APP_F_TARGET, 20, 355, true);
-    MakeAppAppearanceGroup(L"\x4e13\x5c5e\x89c4\x5219\xff1a\x5931\x6d3b\x7a97\x53e3", IDC_APP_U_TARGET, 405, 355, false);
+    MakeAppAppearanceGroup(TextId::GroupAppRuleFocused, IDC_APP_F_TARGET, 20, 355, true);
+    MakeAppAppearanceGroup(TextId::GroupAppRuleUnfocused, IDC_APP_U_TARGET, 405, 355, false);
 
     g_activePage = static_cast<int>(EditorPage::Blacklist);
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x8fdb\x7a0b\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 20, 55, 365, 240);
+    MakeControl(L"BUTTON", Str(TextId::GroupBlacklistProcesses), BS_GROUPBOX, 0, 20, 55, 365, 240);
     g_controls.blacklistProcesses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
                                                   IDC_BLACK_PROCESSES, 35, 90, 335, 185);
-    MakeControl(L"BUTTON", L"\x9ed1\x540d\x5355\x7a97\x53e3\x7c7b\x540d\xff08\x6bcf\x884c\x4e00\x4e2a\xff09", BS_GROUPBOX, 0, 405, 55, 365, 240);
+    MakeControl(L"BUTTON", Str(TextId::GroupBlacklistClasses), BS_GROUPBOX, 0, 405, 55, 365, 240);
     g_controls.blacklistClasses = MakeControl(L"EDIT", L"", WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
                                                IDC_BLACK_CLASSES, 420, 90, 335, 185);
-    MakeLabel(L"\x547d\x4e2d\x9ed1\x540d\x5355\x7684\x7a97\x53e3\x88ab\x5b8c\x5168\x8df3\x8fc7\xff0c\x4e0d\x6e32\x67d3\x4e5f\x4e0d\x4fee\x6539\x6837\x5f0f\x3002", 24, 315, 740);
+    MakeLabel(Str(TextId::LabelBlacklistNote), 24, 315, 740);
     SendMessageW(g_controls.blacklistProcesses, EM_SETLIMITTEXT, 8192, 0);
     SendMessageW(g_controls.blacklistClasses, EM_SETLIMITTEXT, 8192, 0);
 
     g_registerPageControls = false;
-    MakeLabel(L"\x9ed1\x540d\x5355\x4e0e\x4e13\x5c5e\x89c4\x5219\x4f1a\x5199\x5165 config.yaml\xff0c\x8fd0\x884c\x4e2d\x7684 WinGlass \x4f1a\x81ea\x52a8\x5e94\x7528\x3002", 24, 858, 740);
+    MakeLabel(Str(TextId::LabelSaveNote), 24, 858, 740);
     g_controls.status = MakeLabel(L"", 24, 882, 740);
-    MakeControl(L"BUTTON", L"\x4fdd\x5b58\x5e76\x5e94\x7528", BS_DEFPUSHBUTTON, IDC_SAVE, 410, 913, 150, 30);
-    MakeControl(L"BUTTON", L"\x91cd\x65b0\x52a0\x8f7d", 0, IDC_RELOAD, 570, 913, 90, 30);
-    MakeControl(L"BUTTON", L"\x6253\x5f00\x6587\x4ef6\x5939", 0, IDC_OPEN_FOLDER, 670, 913, 100, 30);
-    MakeControl(L"BUTTON", L"\x5173\x95ed", 0, IDC_EXIT, 300, 913, 90, 30);
+    MakeControl(L"BUTTON", Str(TextId::ButtonSave), BS_DEFPUSHBUTTON, IDC_SAVE, 410, 913, 150, 30);
+    MakeControl(L"BUTTON", Str(TextId::ButtonReload), 0, IDC_RELOAD, 570, 913, 90, 30);
+    MakeControl(L"BUTTON", Str(TextId::ButtonOpenFolder), 0, IDC_OPEN_FOLDER, 670, 913, 100, 30);
+    MakeControl(L"BUTTON", Str(TextId::ButtonClose), 0, IDC_EXIT, 300, 913, 90, 30);
     g_registerPageControls = true;
 
     ActivatePage(static_cast<int>(EditorPage::Global));
@@ -2253,6 +2466,80 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+// One child control's caption and client width, collected while the hidden
+// self-test window exists.
+struct ControlCaption {
+    std::wstring caption;
+    int width = 0;
+};
+
+BOOL CALLBACK CollectControlCaption(HWND child, LPARAM param) {
+    if (GetParent(child) != g_window) return TRUE;
+    const int length = GetWindowTextLengthW(child);
+    if (length <= 0) return TRUE;
+    auto* controls = reinterpret_cast<std::vector<ControlCaption>*>(param);
+    ControlCaption entry;
+    entry.caption.assign(static_cast<size_t>(length), L'\0');
+    GetWindowTextW(child, entry.caption.data(), length + 1);
+    RECT rect{};
+    GetClientRect(child, &rect);
+    entry.width = rect.right - rect.left;
+    controls->push_back(std::move(entry));
+    return TRUE;
+}
+
+// --ui-self-test: prints the resolved language and every table row, English in
+// full, and measures each English caption with GetTextExtentPoint32 against the
+// width of the control that carries it. A hidden editor window is built first
+// (g_suppressDialogs keeps a missing config from raising a blocking message
+// box) so the measurement uses the real control geometry and the real window
+// font. Console output is ASCII only: every caption is English.
+int UiSelfTest(HWND window) {
+    std::vector<ControlCaption> controls;
+    EnumChildWindows(window, &CollectControlCaption, reinterpret_cast<LPARAM>(&controls));
+    HDC dc = GetDC(window);
+    const HGDIOBJ windowFont = g_font ? g_font : GetStockObject(DEFAULT_GUI_FONT);
+    const HGDIOBJ previousFont = dc ? SelectObject(dc, windowFont) : nullptr;
+
+    std::wprintf(L"ui_language=%ls strings=%zu\n", g_language == UiLanguage::English ? L"en" : L"zh", std::size(kTexts));
+    size_t tooWide = 0;
+    for (size_t index = 0; index < std::size(kTexts); ++index) {
+        const TextId id = static_cast<TextId>(index);
+        const wchar_t* english = kTexts[index].english;
+        SIZE extent{};
+        const bool measured = dc && GetTextExtentPoint32W(dc, english, static_cast<int>(wcslen(english)), &extent) != FALSE;
+        const int textWidth = measured ? static_cast<int>(extent.cx) : -1;
+        int controlWidth = -1;
+        for (const ControlCaption& control : controls) {
+            if (control.caption == english || control.caption == kTexts[index].chinese) {
+                if (controlWidth < 0 || control.width < controlWidth) controlWidth = control.width;
+            }
+        }
+        // The page titles are tab items rather than child controls, so give
+        // them their share of the tab strip instead.
+        if (controlWidth < 0 && g_controls.tabs) {
+            const int tabIndex = id == TextId::TabGlobal ? 0 : id == TextId::TabApplications ? 1 : id == TextId::TabBlacklist ? 2 : -1;
+            if (tabIndex >= 0) {
+                RECT tabRect{};
+                GetClientRect(g_controls.tabs, &tabRect);
+                controlWidth = (tabRect.right - tabRect.left) / kEditorPageCount;
+            }
+        }
+        const bool overflows = controlWidth >= 0 && textWidth > controlWidth;
+        if (overflows) ++tooWide;
+        std::wprintf(L"  [%2zu] width=%4d control=%4d %-8ls en=%ls\n",
+                     index, textWidth, controlWidth, controlWidth < 0 ? L"N/A" : (overflows ? L"TOO_WIDE" : L"OK"), english);
+    }
+    if (dc) {
+        if (previousFont) SelectObject(dc, previousFont);
+        ReleaseDC(window, dc);
+    }
+    std::wprintf(L"too_wide=%zu\n", tooWide);
+    // The measurement is a regression gate as well as a report: a translation
+    // that no longer fits the control that carries it must not pass silently.
+    return tooWide == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCommand) {
@@ -2260,6 +2547,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     // The experimental clipboard palette decodes PNG through the Windows
     // Imaging Component, which needs COM on the UI thread.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // Resolve the configuration next to the executable before anything else:
+    // language resolution and every diagnostic need the same path, and a
+    // release folder is meant to be runnable from any working directory.
+    wchar_t module[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, module, MAX_PATH);
+    g_configPath = module;
+    const size_t slash = g_configPath.find_last_of(L"\\/");
+    g_configPath = (slash == std::wstring::npos ? L"" : g_configPath.substr(0, slash + 1)) + L"config.yaml";
     // Diagnostic mode: read whatever image is currently on the clipboard, print
     // the extracted palette and exit. It runs the exact code path the dialog
     // uses, which makes "my screenshot produced odd colours" easy to check.
@@ -2300,19 +2595,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     // out through the same writer the Save button uses, and exit. It makes
     // "did my rule survive a save?" answerable without clicking anything.
     if (commandLine && wcsstr(commandLine, L"--config-round-trip")) {
-        wchar_t module[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, module, MAX_PATH);
-        std::wstring base = module;
-        const size_t slash = base.find_last_of(L"\\/");
-        base = slash == std::wstring::npos ? std::wstring() : base.substr(0, slash + 1);
-        const std::wstring source = base + L"config.yaml";
+        std::wstring directory = g_configPath;
+        const size_t lastSlash = directory.find_last_of(L"\\/");
+        directory = lastSlash == std::wstring::npos ? std::wstring() : directory.substr(0, lastSlash + 1);
+        const std::wstring source = g_configPath;
         EditorConfig loaded;
         if (!LoadConfigFile(loaded, source)) {
             std::wprintf(L"round trip failed: cannot load %ls\n", source.c_str());
             CoUninitialize();
             return 2;
         }
-        const std::wstring target = base + L"config.roundtrip.yaml";
+        const std::wstring target = directory + L"config.roundtrip.yaml";
         if (!SaveConfigFile(loaded, target)) {
             std::wprintf(L"round trip failed: cannot write %ls\n", target.c_str());
             CoUninitialize();
@@ -2330,11 +2623,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     commonControls.dwSize = sizeof(commonControls);
     commonControls.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES;
     InitCommonControlsEx(&commonControls);
-    wchar_t module[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, module, MAX_PATH);
-    g_configPath = module;
-    const size_t slash = g_configPath.find_last_of(L"\\/");
-    g_configPath = (slash == std::wstring::npos ? L"" : g_configPath.substr(0, slash + 1)) + L"config.yaml";
+
+    // Same language precedence as the resident process: an explicit --lang=
+    // wins, otherwise the ui_language configuration value decides, otherwise
+    // the Windows display language. "auto" falls through to the system.
+    EditorConfig languageConfig;
+    const bool languageConfigLoaded = LoadConfigFile(languageConfig, g_configPath);
+    ResolveUiLanguage(commandLine, languageConfigLoaded ? languageConfig.uiLanguage : std::wstring(L"auto"));
+    const bool uiSelfTest = commandLine && wcsstr(commandLine, L"--ui-self-test") != nullptr;
+    // The self-test builds the window hidden; suppress the load-failure box so
+    // a console run can never block on it.
+    g_suppressDialogs = uiSelfTest;
 
     g_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     WNDCLASSEXW windowClass{};
@@ -2349,11 +2648,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     if (!RegisterClassExW(&windowClass)) return 2;
 
     g_window = CreateWindowExW(WS_EX_APPWINDOW, windowClass.lpszClassName,
-                               L"WinGlass \x914d\x7f6e\x7f16\x8f91\x5668", WS_OVERLAPPED | WS_CAPTION |
+                               Str(TextId::WindowTitle), WS_OVERLAPPED | WS_CAPTION |
                                WS_SYSMENU | WS_MINIMIZEBOX,
                                CW_USEDEFAULT, CW_USEDEFAULT, 810, 1000,
                                nullptr, nullptr, instance, nullptr);
     if (!g_window) return 3;
+    if (uiSelfTest) {
+        const int result = UiSelfTest(g_window);
+        DestroyWindow(g_window);
+        CoUninitialize();
+        return result;
+    }
     ShowWindow(g_window, showCommand);
     UpdateWindow(g_window);
 

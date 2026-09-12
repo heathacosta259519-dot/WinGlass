@@ -83,7 +83,12 @@ void SelectLanguage(const std::wstring& tag) {
     g_language = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE) ? UiLanguage::Chinese : UiLanguage::English;
 }
 
-void ResolveUiLanguage(const wchar_t* commandLine) {
+// An explicit non-empty --lang= wins over everything. When it is absent (or
+// empty), the `ui_language` configuration value decides; "auto" and any other
+// unknown tag fall through to the Windows display language. The configuration
+// pointer is null during the earliest startup work, so the helper can be
+// called before the file has been read.
+void ResolveUiLanguage(const wchar_t* commandLine, const std::wstring* configLanguage = nullptr) {
     std::wstring tag;
     if (commandLine) {
         const wchar_t* flag = wcsstr(commandLine, L"--lang=");
@@ -91,6 +96,7 @@ void ResolveUiLanguage(const wchar_t* commandLine) {
             for (flag += 7; *flag && *flag != L' ' && *flag != L'"'; ++flag) tag += *flag;
         }
     }
+    if (tag.empty() && configLanguage) tag = *configLanguage;
     SelectLanguage(tag);
 }
 
@@ -175,6 +181,11 @@ struct Config {
     // or stop applying while both the HWND and the configuration stay exactly
     // the same, so rule resolution cannot be limited to configuration reloads.
     bool anyTitleMatcher = false;
+    // "auto" / "zh" / "en"; an explicit --lang= overrides it.  Kept as the raw
+    // tag so the same SelectLanguage() spelling rules apply as on the command
+    // line, and "auto" needs no special case (it falls back to the display
+    // language).
+    std::wstring uiLanguage = L"auto";
 };
 
 struct WindowState {
@@ -629,7 +640,12 @@ bool LoadIniConfig(Config& result, const std::wstring& path) {
         if (eq == std::wstring::npos) continue;
         const auto key = Trim(line.substr(0, eq));
         const auto value = Trim(line.substr(eq + 1));
-        if (section == L"global") SetField(next.global, key, value);
+        if (section == L"global") {
+            // ui_language belongs to the whole configuration, not to a Rule,
+            // so it is handled here instead of inside SetField().
+            if (Lower(key) == L"ui_language") next.uiLanguage = Lower(Trim(value));
+            else SetField(next.global, key, value);
+        }
         else if (appIndex >= 0) { SetField(next.apps[appIndex].rule, key, value); SetMatchField(next.apps[appIndex], key, value); }
         else if (section == L"blacklist") next.blacklist[Lower(key)] = ParseBool(value, true);
     }
@@ -710,6 +726,7 @@ bool LoadYamlConfig(Config& result, const std::wstring& path) {
             else if (key == L"type") state = Lower(UnquoteYaml(value));
             else if (key == L"config") continue;
             else if (key == L"enabled" && state.empty()) next.global.enabled = ParseBool(UnquoteYaml(value), next.global.enabled);
+            else if (key == L"ui_language" && state.empty()) next.uiLanguage = Lower(UnquoteYaml(value));
             else if (state == L"focused" || state == L"unfocused") SetYamlStateField(next.global, state == L"focused", key, value);
             continue;
         }
@@ -1934,8 +1951,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     g_diagnosticsPath = base + L"winglass.log";
     g_startupStatePath = base + L"winglass.startup-state";
     g_configPath = base + L"config.yaml";
-    // Before anything can show a message: an explicit --lang= wins,
-    // otherwise the Windows display language decides.
+    // Before anything can show a message: an explicit --lang= wins, otherwise
+    // the Windows display language decides. The `ui_language` configuration
+    // value is applied a second time once the file has been read, because the
+    // elevated startup helper below must keep working with a broken config.
     ResolveUiLanguage(commandLine);
     // This is deliberately before config parsing and the desktop check: the
     // elevated helper must remain usable even when the normal process is on a
@@ -1947,6 +1966,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     if (!GetFileAttributesExW(g_configPath.c_str(), GetFileExInfoStandard, &configData)) g_configPath = base + L"config.ini";
     if (!LoadConfig(g_config, g_configPath)) return 2;
     g_configWriteTime = g_config.writeTime;
+    // Now that the file is loaded, let `ui_language` take effect unless the
+    // command line carried an explicit tag.
+    ResolveUiLanguage(commandLine, &g_config.uiLanguage);
     if (wcsstr(commandLine, L"--lang-self-test")) return LanguageSelfTest();
     if (wcsstr(commandLine, L"--self-test")) return SelfTest();
     const bool relaunchAttempt = wcsstr(commandLine, L"--interactive-relaunch") != nullptr;
