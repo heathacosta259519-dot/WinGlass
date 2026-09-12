@@ -120,7 +120,7 @@ flowchart LR
 .\build.ps1
 ```
 
-产出三个可执行文件：
+构建会把三个可执行文件写进 `release` 目录：
 
 | 产物 | 作用 |
 |---|---|
@@ -133,21 +133,23 @@ flowchart LR
 ### 运行
 
 ```powershell
-.\winglass.exe
+.\release\winglass.exe
 ```
 
-首次运行会在 exe 同目录读取 `config.yaml`（不存在则回退 `config.ini`，两者都没有就用内置默认值）。仓库里带的是示例文件，先复制一份再按需改：
+首次运行会在 exe 同目录读取 `config.yaml`（不存在则回退 `config.ini`，两者都没有就用内置默认值）。构建已经把示例文件复制到它旁边了，先复制一份再按需改：
 
 ```powershell
-Copy-Item config.example.yaml config.yaml   # 想用 INI 写法就复制 config.example.ini
+Copy-Item config.example.yaml release\config.yaml   # 想用 INI 写法就复制 config.example.ini
 ```
+
+> 配置是按 **exe 所在目录**找的，不是当前目录，所以要跟 `winglass.exe` 一起放在 `release` 里。
 
 程序没有主窗口，只在通知区域显示一个图标。
 
 自检（推荐先跑一次，确认系统接受合成策略）：
 
 ```powershell
-.\winglass.exe --self-test
+.\release\winglass.exe --self-test
 ```
 
 ```

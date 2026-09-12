@@ -122,7 +122,7 @@ From an x64 VS2022 Developer PowerShell:
 .\build.ps1
 ```
 
-Three executables are produced:
+The build writes three executables into `release`:
 
 | Artifact | Purpose |
 |---|---|
@@ -135,21 +135,23 @@ Three executables are produced:
 ### Run
 
 ```powershell
-.\winglass.exe
+.\release\winglass.exe
 ```
 
-On first run it reads `config.yaml` next to the executable (falling back to `config.ini`, then to built-in defaults). The repository ships example files instead — copy one first:
+On first run it reads `config.yaml` next to the executable (falling back to `config.ini`, then to built-in defaults). The build copies the example files in next to them — copy one first:
 
 ```powershell
-Copy-Item config.example.yaml config.yaml   # use config.example.ini for the INI flavour
+Copy-Item config.example.yaml release\config.yaml   # use config.example.ini for the INI flavour
 ```
+
+> The configuration is read from the executable's own directory, not the current one, so it has to sit in `release` next to `winglass.exe`.
 
 There is no main window; the program only shows a notification-area icon.
 
 Self-test (worth running once to confirm your system accepts the composition strategy):
 
 ```powershell
-.\winglass.exe --self-test
+.\release\winglass.exe --self-test
 ```
 
 ```

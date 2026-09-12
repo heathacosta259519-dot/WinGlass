@@ -1,8 +1,61 @@
-// WinGlass application icon.
+// WinGlass application icon and version resource.
+//
+// Shared by all three executables: build.ps1 compiles this script once per
+// target with a bare /d flag (no value, so there is nothing for cmd to mangle),
+// which selects the matching FileDescription and OriginalFilename below.
+//
 // The .ico carries 16/32/48/64/128/256 px frames so Explorer, the taskbar and
 // the notification area all get a crisp image. The SVG/PNG next to it are the
 // design sources and are not consumed by the build.
 
 #include "winglass-resource.h"
+#include <winver.h>
+
+// ---------------------------------------------------------------------------
+// Per-target identity
+// ---------------------------------------------------------------------------
+#if defined(WINGLASS_TARGET_EDITOR)
+#define WINGLASS_EXE_NAME     "winglass-config.exe\0"
+#define WINGLASS_INTERNAL     "winglass-config\0"
+#define WINGLASS_DESCRIPTION  "WinGlass config editor\0"
+#elif defined(WINGLASS_TARGET_WATCHDOG)
+#define WINGLASS_EXE_NAME     "winglass-watchdog.exe\0"
+#define WINGLASS_INTERNAL     "winglass-watchdog\0"
+#define WINGLASS_DESCRIPTION  "WinGlass watchdog - restores window styles after a crash\0"
+#else
+// WINGLASS_TARGET_MAIN, plus the fallback for a plain `rc winglass.rc`.
+#define WINGLASS_EXE_NAME     "winglass.exe\0"
+#define WINGLASS_INTERNAL     "winglass\0"
+#define WINGLASS_DESCRIPTION  "WinGlass - global frosted glass for Windows 11\0"
+#endif
 
 IDI_WINGLASS_ICON ICON "assets\\winglass-icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+  FILEVERSION    WINGLASS_FILEVERSION
+  PRODUCTVERSION WINGLASS_FILEVERSION
+  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+  FILEFLAGS      0
+  FILEOS         VOS_NT_WINDOWS32
+  FILETYPE       VFT_APP
+  FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"    // 0x0409 = U.S. English, 0x04b0 = Unicode 1200
+        BEGIN
+            VALUE "CompanyName",      WINGLASS_COMPANY_NAME "\0"
+            VALUE "FileDescription",  WINGLASS_DESCRIPTION
+            VALUE "FileVersion",      WINGLASS_FILEVERSION_STRING "\0"
+            VALUE "InternalName",     WINGLASS_INTERNAL
+            VALUE "LegalCopyright",   WINGLASS_COPYRIGHT "\0"
+            VALUE "OriginalFilename", WINGLASS_EXE_NAME
+            VALUE "ProductName",      WINGLASS_PRODUCT_NAME "\0"
+            VALUE "ProductVersion",   WINGLASS_PRODUCTVERSION_STRING "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
