@@ -613,12 +613,16 @@ void PutAppRule(const AppRule& rule) {
 }
 
 void PopulateAppRuleList() {
-    SendMessageW(g_controls.appRules, LB_RESETCONTENT, 0, 0);
-    for (const auto& rule : g_config.appRules) SendMessageW(g_controls.appRules, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(rule.process.c_str()));
+    // A combo box keeps the rule selector compact and avoids accidental
+    // activation while the user is editing the appearance fields below.
+    SendMessageW(g_controls.appRules, CB_RESETCONTENT, 0, 0);
+    for (const auto& rule : g_config.appRules) SendMessageW(g_controls.appRules, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(rule.process.c_str()));
     if (g_selectedAppRule >= static_cast<int>(g_config.appRules.size())) g_selectedAppRule = -1;
     if (g_selectedAppRule >= 0) {
-        SendMessageW(g_controls.appRules, LB_SETCURSEL, g_selectedAppRule, 0);
+        SendMessageW(g_controls.appRules, CB_SETCURSEL, g_selectedAppRule, 0);
         PutAppRule(g_config.appRules[static_cast<size_t>(g_selectedAppRule)]);
+    } else {
+        SendMessageW(g_controls.appRules, CB_SETCURSEL, static_cast<WPARAM>(-1), 0);
     }
     EnableAppRuleControls(g_selectedAppRule >= 0);
 }
@@ -1097,8 +1101,8 @@ void CreateControls() {
     g_controls.addAppRule = MakeControl(L"BUTTON", L"\x521b\x5efa\x4e13\x5c5e\x89c4\x5219", 0,
                                          IDC_ADD_APP_RULE, 530, 368, 130, 25);
     MakeLabel(L"\x5df2\x6709\x4e13\x5c5e\x89c4\x5219", 35, 399, 100);
-    g_controls.appRules = MakeControl(L"LISTBOX", L"", WS_BORDER | LBS_NOTIFY | WS_VSCROLL,
-                                      IDC_APP_RULES, 125, 396, 360, 25);
+    g_controls.appRules = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                      IDC_APP_RULES, 125, 396, 360, 220);
     g_controls.removeAppRule = MakeControl(L"BUTTON", L"\x5220\x9664\x5f53\x524d\x89c4\x5219", 0, IDC_REMOVE_APP_RULE, 500, 396, 120, 25);
     SetSelectedProcess(L"", L"");
 
@@ -1141,9 +1145,9 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         case IDC_ADD_APP_RULE: AddSelectedProcessRule(); return 0;
         case IDC_REMOVE_APP_RULE: RemoveSelectedAppRule(); return 0;
         case IDC_APP_RULES:
-            if (HIWORD(wParam) == LBN_SELCHANGE) {
-                const int selected = static_cast<int>(SendMessageW(g_controls.appRules, LB_GETCURSEL, 0, 0));
-                SelectAppRule(selected == LB_ERR ? -1 : selected);
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                const int selected = static_cast<int>(SendMessageW(g_controls.appRules, CB_GETCURSEL, 0, 0));
+                SelectAppRule(selected == CB_ERR ? -1 : selected);
             }
             return 0;
         case IDC_OPEN_FOLDER: OpenConfigFolder(); return 0;
