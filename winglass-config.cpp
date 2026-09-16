@@ -49,6 +49,7 @@ namespace {
     T(ComboFollowSystem, L"\x8ddf\x968f\x7cfb\x7edf", L"Follow system") \
     T(ComboChinese, L"\x4e2d\x6587", L"Chinese") \
     T(ComboEnglish, L"\x82f1\x6587", L"English") \
+    T(CheckboxCheckUpdates, L"\x542f\x52a8\x65f6\x68c0\x67e5\x66f4\x65b0", L"Check for updates on startup") \
     T(GroupFocusedWindow, L"\x805a\x7126\x7a97\x53e3", L"Focused window") \
     T(GroupUnfocusedWindow, L"\x5931\x6d3b\x7a97\x53e3", L"Unfocused window") \
     T(LabelTargetOpacity, L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", L"Target opacity (0.05 - 1.0)") \
@@ -245,6 +246,10 @@ struct EditorConfig {
     // "auto" / "zh" / "en", matching the resident process. The editor writes
     // the key back on every save, so it has to live in the model.
     std::wstring uiLanguage = L"auto";
+    // Whether the resident process checks GitHub for a newer release. The
+    // editor rewrites the whole file, so a key that is not in the model would
+    // be destroyed on the next save.
+    bool checkUpdates = true;
 };
 
 enum ControlId {
@@ -261,7 +266,8 @@ enum ControlId {
     // These are only ever used inside this process.
     IDC_TABS,
     IDC_APP_MATCH_CLASS, IDC_APP_MATCH_TITLE, IDC_APP_MATCH_AUMID,
-    IDC_UI_LANGUAGE
+    IDC_UI_LANGUAGE,
+    IDC_CHECK_UPDATES
 };
 
 struct Controls {
@@ -308,6 +314,7 @@ struct Controls {
     HWND appMatchTitle = nullptr;
     HWND appMatchAumid = nullptr;
     HWND uiLanguage = nullptr;
+    HWND checkUpdates = nullptr;
 } g_controls;
 
 HINSTANCE g_instance = nullptr;
@@ -620,6 +627,7 @@ bool LoadYaml(EditorConfig& result, const std::wstring& text) {
                 const std::wstring tag = LowerTag(Unquote(value));
                 result.uiLanguage = tag.empty() ? L"auto" : tag;
             }
+            else if (key == L"check_updates") result.checkUpdates = ParseBool(value, result.checkUpdates);
             else if (key == L"focused") section = Section::Focused;
             else if (key == L"unfocused") section = Section::Unfocused;
             continue;
@@ -677,6 +685,7 @@ bool LoadIniFallback(EditorConfig& result, const std::wstring& text) {
                 const std::wstring tag = LowerTag(value);
                 result.uiLanguage = tag.empty() ? L"auto" : tag;
             }
+            else if (key == L"check_updates") result.checkUpdates = ParseBool(value, result.checkUpdates);
             else if (key == L"active_opacity") result.focused.targetOpacity = ParseDouble(value, result.focused.targetOpacity, 0.05, 1.0);
             else if (key == L"inactive_opacity") result.unfocused.targetOpacity = ParseDouble(value, result.unfocused.targetOpacity, 0.05, 1.0);
             else if (key == L"active_acrylic") result.focused.glass = ParseBool(value, result.focused.glass);
@@ -771,6 +780,7 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
     output << L"\nglobal:\n"
            << L"  enabled: " << (config.enabled ? L"true" : L"false") << L"\n"
            << L"  ui_language: " << (config.uiLanguage.empty() ? L"auto" : config.uiLanguage.c_str()) << L"\n"
+           << L"  check_updates: " << (config.checkUpdates ? L"true" : L"false") << L"\n"
            << AppearanceYaml(config.focused, L"focused")
            << AppearanceYaml(config.unfocused, L"unfocused");
     if (!config.appRules.empty()) {
@@ -1404,6 +1414,7 @@ void PopulateUiLanguageCombo() {
 void LoadToControls() {
     SendMessageW(g_controls.enabled, BM_SETCHECK, g_config.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     PopulateUiLanguageCombo();
+    SendMessageW(g_controls.checkUpdates, BM_SETCHECK, g_config.checkUpdates ? BST_CHECKED : BST_UNCHECKED, 0);
     PutAppearance(g_config.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
                   g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     PutAppearance(g_config.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
@@ -2196,6 +2207,7 @@ bool SaveFromControls() {
     // exactly what the user picked, independent of the editor's own language.
     const int languageIndex = static_cast<int>(SendMessageW(g_controls.uiLanguage, CB_GETCURSEL, 0, 0));
     updated.uiLanguage = languageIndex == 1 ? L"zh" : languageIndex == 2 ? L"en" : L"auto";
+    updated.checkUpdates = SendMessageW(g_controls.checkUpdates, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ReadAppearance(updated.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
                         g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen) ||
         !ReadAppearance(updated.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
@@ -2358,6 +2370,10 @@ void CreateControls() {
     MakeLabel(Str(TextId::LabelInterfaceLanguage), 24, 420, 200);
     g_controls.uiLanguage = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
                                         IDC_UI_LANGUAGE, 24, 444, 220, 200);
+    // The update check belongs to the resident process, but it is a process-wide
+    // toggle like the interface language, so it lives on the Global page too.
+    g_controls.checkUpdates = MakeControl(L"BUTTON", Str(TextId::CheckboxCheckUpdates), BS_AUTOCHECKBOX,
+                                          IDC_CHECK_UPDATES, 280, 448, 380, 22);
 
     g_activePage = static_cast<int>(EditorPage::Applications);
     MakeControl(L"BUTTON", Str(TextId::GroupRunningProcesses), BS_GROUPBOX, 0, 20, 55, 750, 120);

@@ -223,6 +223,7 @@ applications:
 |---|---|---|---|---|
 | `enabled` (global level) | `[Global] enabled` | `true` / `false` | `true` | Master switch; turning it off restores every window |
 | `ui_language` (global level) | `[Global] ui_language` | `auto` / `zh` / `en` | `auto` | Interface language; `auto` follows the Windows display language. A command-line `--lang=` still wins |
+| `check_updates` (global level) | `[Global] check_updates` | `true` / `false` | `true` | Check GitHub for a newer release and offer to open it in a browser. Only a plain HTTPS request to the GitHub API is sent |
 | `target_opacity` | `active_opacity` / `inactive_opacity` | `0–1` (also accepts `0–100`, `0–255`) | `0.90` / `0.82` | Opacity of the target window content |
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | Frosted backdrop on/off; tint remains when off |
 | `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | Temporarily restore full-screen, borderless windows such as browser video and games |

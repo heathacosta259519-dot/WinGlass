@@ -221,6 +221,7 @@ applications:
 |---|---|---|---|---|
 | `enabled`（global 级） | `[Global] enabled` | `true` / `false` | `true` | 总开关；关掉会还原所有窗口 |
 | `ui_language`（global 级） | `[Global] ui_language` | `auto` / `zh` / `en` | `auto` | 界面语言；`auto` 跟随 Windows 显示语言。命令行 `--lang=` 优先级更高 |
+| `check_updates`（global 级） | `[Global] check_updates` | `true` / `false` | `true` | 检查 GitHub 是否有新版本并提供在浏览器中打开的入口。只会向 GitHub API 发送一次普通 HTTPS 请求 |
 | `target_opacity` | `active_opacity` / `inactive_opacity` | `0–1`（也接受 `0–100`、`0–255`） | `0.90` / `0.82` | 目标窗口内容的不透明度 |
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | 是否启用磨砂背板；关掉后仍保留纯染色 |
 | `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | 检测到覆盖整个显示器的无边框窗口时，暂时恢复原样；适合浏览器全屏视频和游戏 |

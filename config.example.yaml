@@ -40,6 +40,7 @@ blacklist:
 global:
   enabled: true
   ui_language: auto            # auto = 跟随 Windows 显示语言；也可写 zh / en
+  check_updates: true          # 启动时检查 GitHub 是否有新版本（仅发一次普通 HTTPS 请求）
   focused:                     # 聚焦态
     target_opacity: 0.60       # 目标窗口内容让位程度，0.05–1.0（越低越透）
     enable_glass: true         # 是否启用磨砂背板；关掉仍保留纯染色

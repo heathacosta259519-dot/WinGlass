@@ -8,14 +8,20 @@
 #include <psapi.h>
 #include <shellapi.h>
 #include <oleauto.h>
+// WinHTTP is the only network dependency: one HTTPS GET to the GitHub releases
+// API, from the resident process only. The editor and the watchdog stay offline.
+#include <winhttp.h>
 // GetApplicationUserModelId: the package identity is the only reliable way to
 // tell two Store/MSIX applications apart, because they share one host process.
 #include <appmodel.h>
+#include <process.h>
 
 #include "winglass-resource.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cwctype>
@@ -23,6 +29,7 @@
 #include <iomanip>
 #include <iterator>
 #include <map>
+#include <new>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -37,6 +44,7 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 namespace {
 
@@ -53,7 +61,10 @@ namespace {
     T(MenuStartupOff, L"\x5173\x95ed\x5f00\x673a\x542f\x52a8", L"Disable startup at sign-in") \
     T(MenuExit, L"\x9000\x51fa", L"Exit") \
     T(StartupEnableFailed, L"\x65e0\x6cd5\x542f\x7528\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not enable startup at sign-in. Details were written to winglass.log.") \
-    T(StartupDisableFailed, L"\x65e0\x6cd5\x5173\x95ed\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not disable startup at sign-in. Details were written to winglass.log.")
+    T(StartupDisableFailed, L"\x65e0\x6cd5\x5173\x95ed\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not disable startup at sign-in. Details were written to winglass.log.") \
+    T(MenuDownloadFormat, L"\x4e0b\x8f7d v%ls", L"Download v%ls") \
+    T(BalloonUpdateTitle, L"WinGlass \x66f4\x65b0", L"WinGlass update") \
+    T(BalloonUpdateFormat, L"WinGlass \x6709\x65b0\x7248\x672c %ls\xff0c\x70b9\x51fb\x6258\x76d8\x83dc\x5355\x4e0b\x8f7d\x3002", L"WinGlass %ls is available. Open the tray menu to download it.")
 
 enum class TextId {
 #define WINGLASS_DECLARE_TEXT(id, zh, en) id,
@@ -186,6 +197,10 @@ struct Config {
     // line, and "auto" needs no special case (it falls back to the display
     // language).
     std::wstring uiLanguage = L"auto";
+    // Process-wide behaviour, not a per-window Rule field, so it lives beside
+    // uiLanguage instead of inside the global appearance block. A plain bool,
+    // unlike uiLanguage it needs no special spelling rules.
+    bool checkUpdates = true;
 };
 
 struct WindowState {
@@ -251,11 +266,16 @@ static const wchar_t* kTrayClass = L"WinGlassTrayWindow";
 static const wchar_t* kManagedProperty = L"WinGlass.ManagedTarget.v1";
 static constexpr UINT_PTR kManagedMarkerValue = 0x57474C31; // "WGL1"
 static constexpr UINT kTrayMessage = WM_APP + 42;
+// The update worker posts its result to the tray window instead of touching the
+// UI itself; the main thread owns g_updateVersion and the tray balloon.
+static constexpr UINT kUpdateCheckMessage = WM_APP + 43;
 static constexpr UINT kTrayOpenConfig = 41001;
 static constexpr UINT kTrayReload = 41002;
 static constexpr UINT kTrayStartup = 41003;
 static constexpr UINT kTrayExit = 41004;
 static constexpr UINT kTrayEditor = 41005;
+// Stable id for the conditional "Download vX.Y.Z" item.
+static constexpr UINT kTrayDownload = 41006;
 static constexpr size_t kMaxTrackedWindows = 12;
 // Keep the Run-key location and value name centralized so reads, writes, and
 // post-operation verification always refer to the same startup entry.
@@ -287,6 +307,17 @@ static bool g_visualAnimationActive = false;
 // for the tray label when HKCU cannot be queried across that identity boundary.
 static bool g_startupStateKnown = false;
 static bool g_startupStateEnabled = false;
+// Update-check state. g_updateCheckEnabled mirrors Config::checkUpdates and is
+// written by the main thread only; the worker reads it so a hot-reloaded
+// `check_updates: false` stops the next request without stopping the thread.
+static std::atomic<bool> g_updateCheckEnabled{true};
+static HANDLE g_updateThread = nullptr;
+static HANDLE g_updateStopEvent = nullptr;
+// Non-empty only after a strictly newer release has been found. Written by the
+// main thread when it handles kUpdateCheckMessage, read when the tray menu is
+// built, so the worker never touches it.
+static std::wstring g_updateVersion;
+static constexpr DWORD kUpdateCheckIntervalMs = 24u * 60u * 60u * 1000u;
 
 void CleanupAllWindows();
 
@@ -323,6 +354,347 @@ void WriteDiagnostic(const std::wstring& message) {
     output << time.wYear << L'-' << time.wMonth << L'-' << time.wDay << L' '
            << time.wHour << L':' << time.wMinute << L':' << time.wSecond
            << L"  " << message << L'\n';
+}
+
+// ---------------------------------------------------------------------------
+// GitHub release update check
+//
+// One HTTPS GET against the public releases API, run on a worker thread so the
+// tray icon and the 8 ms effect loop are never blocked by DNS or a slow
+// server. The worker posts a message to the tray window; only the main thread
+// touches the menu and the balloon. Any failure is a single diagnostic line,
+// never a dialog, and never affects window effects.
+// ---------------------------------------------------------------------------
+
+// The diagnostic prints English on purpose: it is a console report and the
+// Chinese half of the table would need an encoding the console cannot promise.
+const wchar_t* EnglishText(TextId id) {
+    const size_t index = static_cast<size_t>(id);
+    if (index >= std::size(kTexts)) return L"";
+    return kTexts[index].english;
+}
+
+std::wstring FormatText(const wchar_t* format, ...) {
+    va_list args;
+    va_start(args, format);
+    const int length = _vscwprintf(format, args);
+    va_end(args);
+    if (length <= 0) return format;
+    std::wstring text(static_cast<size_t>(length), L'\0');
+    va_start(args, format);
+    _vsnwprintf_s(text.data(), text.size() + 1, _TRUNCATE, format, args);
+    va_end(args);
+    return text;
+}
+
+// WINGLASS_PRODUCTVERSION_STRING is a narrow literal because the resource
+// script needs it that way. It is pure ASCII, so a byte-by-byte widen is
+// enough and keeps a temporary edit of the header visible in --check-updates.
+std::wstring ProductVersion() {
+    std::wstring value;
+    for (const char* p = WINGLASS_PRODUCTVERSION_STRING; *p; ++p) {
+        value += static_cast<wchar_t>(static_cast<unsigned char>(*p));
+    }
+    return value;
+}
+
+// Normalises a tag for display. StripVersionPrefix removes the optional
+// leading "v" so a format string that already carries the "v" (the tray menu
+// label) does not end up with two of them; DisplayTag re-adds exactly one for
+// messages that spell the version on its own.
+std::wstring StripVersionPrefix(const std::wstring& tag) {
+    std::wstring value = Trim(tag);
+    if (!value.empty() && (value[0] == L'v' || value[0] == L'V')) value.erase(value.begin());
+    return value;
+}
+
+std::wstring DisplayTag(const std::wstring& tag) {
+    return L"v" + StripVersionPrefix(tag);
+}
+
+// Parses the numeric dotted prefix of a version. Missing components are not
+// invented here; CompareVersions treats them as zero. A non-numeric suffix
+// stops the parse, so "1.2.0-beta" is 1.2.0. Returns false when no numeric
+// component was found at all, which is how empty/garbage tags stay harmless.
+bool ParseVersion(const std::wstring& value, std::vector<int>& parts) {
+    parts.clear();
+    std::wstring text = Trim(value);
+    if (!text.empty() && (text[0] == L'v' || text[0] == L'V')) text.erase(text.begin());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        if (!iswdigit(text[pos])) break;
+        long long number = 0;
+        while (pos < text.size() && iswdigit(text[pos])) {
+            if (number < 100000000) number = number * 10 + (text[pos] - L'0');
+            ++pos;
+        }
+        parts.push_back(static_cast<int>(number));
+        if (pos < text.size() && text[pos] == L'.') { ++pos; continue; }
+        break;
+    }
+    return !parts.empty();
+}
+
+// Numeric component-by-component comparison. An unparsable side compares equal
+// so a malformed tag can never trigger an update offer.
+int CompareVersions(const std::wstring& left, const std::wstring& right) {
+    std::vector<int> a, b;
+    if (!ParseVersion(left, a) || !ParseVersion(right, b)) return 0;
+    const size_t count = std::max(a.size(), b.size());
+    for (size_t i = 0; i < count; ++i) {
+        const int x = i < a.size() ? a[i] : 0;
+        const int y = i < b.size() ? b[i] : 0;
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return 0;
+}
+
+// Scans a JSON body for "tag_name": "...". The endpoint is small and its
+// schema is stable, so a full JSON parser would be more risk than value. An
+// escaped quote is copied literally; tag names never contain one in practice.
+bool ExtractTagName(const std::wstring& json, std::wstring& tag) {
+    const std::wstring key = L"\"tag_name\"";
+    size_t pos = json.find(key);
+    if (pos == std::wstring::npos) return false;
+    pos += key.size();
+    while (pos < json.size() && iswspace(json[pos])) ++pos;
+    if (pos >= json.size() || json[pos] != L':') return false;
+    ++pos;
+    while (pos < json.size() && iswspace(json[pos])) ++pos;
+    if (pos >= json.size() || json[pos] != L'"') return false;
+    ++pos;
+    tag.clear();
+    while (pos < json.size() && json[pos] != L'"') {
+        if (json[pos] == L'\\' && pos + 1 < json.size()) { tag += json[pos + 1]; pos += 2; continue; }
+        tag += json[pos];
+        ++pos;
+    }
+    return pos < json.size();
+}
+
+// Synchronous HTTPS GET. Returns the raw tag and a short ASCII reason on
+// failure. WinHttpSetTimeouts keeps a stalled server from holding the worker
+// (and shutdown) for more than roughly five seconds per phase.
+bool FetchLatestReleaseTag(std::wstring& tag, std::wstring& error) {
+    error.clear();
+    const wchar_t* host = L"api.github.com";
+    const wchar_t* resource = L"/repos/heathacosta259519-dot/WinGlass/releases/latest";
+    HINTERNET session = WinHttpOpen(L"WinGlass", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) { error = L"WinHttpOpen error=" + std::to_wstring(GetLastError()); return false; }
+    WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
+    HINTERNET connection = WinHttpConnect(session, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!connection) {
+        error = L"WinHttpConnect error=" + std::to_wstring(GetLastError());
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    HINTERNET request = WinHttpOpenRequest(connection, L"GET", resource, nullptr,
+                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!request) {
+        error = L"WinHttpOpenRequest error=" + std::to_wstring(GetLastError());
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    // GitHub answers 403 to a request without a User-Agent, so send one that
+    // also identifies the exact build making the request.
+    const std::wstring headers = L"User-Agent: WinGlass/" + ProductVersion();
+    WinHttpAddRequestHeaders(request, headers.c_str(), static_cast<DWORD>(-1),
+                             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    bool ok = true;
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        error = L"WinHttpSendRequest error=" + std::to_wstring(GetLastError());
+        ok = false;
+    }
+    if (ok && !WinHttpReceiveResponse(request, nullptr)) {
+        error = L"WinHttpReceiveResponse error=" + std::to_wstring(GetLastError());
+        ok = false;
+    }
+
+    DWORD status = 0;
+    if (ok) {
+        DWORD statusSize = sizeof(status);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                                 WINHTTP_NO_HEADER_INDEX)) {
+            error = L"WinHttpQueryHeaders error=" + std::to_wstring(GetLastError());
+            ok = false;
+        }
+    }
+    // A redirect or an error page is not a release; only 200 carries the body
+    // this parser expects.
+    if (ok && status != 200) {
+        error = L"HTTP " + std::to_wstring(status);
+        ok = false;
+    }
+
+    std::string body;
+    if (ok) {
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available)) {
+                error = L"WinHttpQueryDataAvailable error=" + std::to_wstring(GetLastError());
+                ok = false;
+                break;
+            }
+            if (available == 0) break;
+            std::vector<char> chunk(available);
+            DWORD read = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &read)) {
+                error = L"WinHttpReadData error=" + std::to_wstring(GetLastError());
+                ok = false;
+                break;
+            }
+            if (read == 0) break;
+            body.append(chunk.data(), read);
+            // The release payload is a few KB; a runaway response is dropped
+            // rather than allowed to grow without bound.
+            if (body.size() > 4u * 1024u * 1024u) break;
+        }
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+
+    if (!ok) return false;
+    if (body.empty()) { error = L"empty response"; return false; }
+
+    const int wide = MultiByteToWideChar(CP_UTF8, 0, body.data(), static_cast<int>(body.size()), nullptr, 0);
+    if (wide <= 0) { error = L"invalid UTF-8 body"; return false; }
+    std::wstring json(static_cast<size_t>(wide), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, body.data(), static_cast<int>(body.size()), json.data(), wide);
+    if (!ExtractTagName(json, tag)) { error = L"tag_name missing"; return false; }
+    return true;
+}
+
+unsigned __stdcall UpdateCheckThreadProc(void*) {
+    // The first check runs immediately; later iterations wait a full day after
+    // the previous check, which is what caps the request rate. While the
+    // feature is disabled the loop only polls the flag once a second.
+    for (;;) {
+        if (g_updateCheckEnabled.load(std::memory_order_relaxed)) {
+            std::wstring tag, error;
+            if (!FetchLatestReleaseTag(tag, error)) {
+                WriteDiagnostic(L"github update check failed: " + error);
+            } else {
+                std::wstring latest = Trim(tag);
+                if (!latest.empty() && (latest[0] == L'v' || latest[0] == L'V')) latest.erase(latest.begin());
+                std::vector<int> parsed;
+                if (latest.empty() || !ParseVersion(latest, parsed)) {
+                    WriteDiagnostic(L"github update check returned an unrecognised tag");
+                } else if (CompareVersions(latest, ProductVersion()) > 0) {
+                    auto* payload = new (std::nothrow) std::wstring(tag);
+                    if (payload && !PostMessageW(g_trayWindow, kUpdateCheckMessage, 0, reinterpret_cast<LPARAM>(payload))) {
+                        delete payload;
+                    }
+                }
+            }
+        }
+        const DWORD waitMs = g_updateCheckEnabled.load(std::memory_order_relaxed) ? kUpdateCheckIntervalMs : 1000;
+        if (WaitForSingleObject(g_updateStopEvent, waitMs) == WAIT_OBJECT_0) break;
+    }
+    return 0;
+}
+
+void StartUpdateCheckThread() {
+    if (g_updateThread) return;
+    g_updateStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_updateStopEvent) return;
+    unsigned threadId = 0;
+    g_updateThread = reinterpret_cast<HANDLE>(_beginthreadex(nullptr, 0, &UpdateCheckThreadProc, nullptr, 0, &threadId));
+    if (!g_updateThread) {
+        CloseHandle(g_updateStopEvent);
+        g_updateStopEvent = nullptr;
+    }
+}
+
+void StopUpdateCheckThread() {
+    if (g_updateStopEvent) SetEvent(g_updateStopEvent);
+    if (g_updateThread) {
+        WaitForSingleObject(g_updateThread, 30000);
+        CloseHandle(g_updateThread);
+        g_updateThread = nullptr;
+    }
+    if (g_updateStopEvent) {
+        CloseHandle(g_updateStopEvent);
+        g_updateStopEvent = nullptr;
+    }
+}
+
+// --update-self-test: no network. The fixed table exercises the JSON tag scan
+// and the numeric comparison, including the malformed inputs that must not
+// crash or offer an update.
+int UpdateSelfTest() {
+    size_t failures = 0;
+
+    struct TagCase { const wchar_t* json; const wchar_t* expected; };
+    const TagCase tagCases[] = {
+        { L"{\"tag_name\": \"v1.2.0\"}", L"v1.2.0" },
+        { L"{ \"tag_name\" : \"1.2.0\" }", L"1.2.0" },
+        { L"{\"tag_name\": \"\"}", L"" },
+        { L"{\"message\": \"Not Found\"}", nullptr },
+    };
+    for (const TagCase& test : tagCases) {
+        std::wstring parsed;
+        const bool found = ExtractTagName(test.json, parsed);
+        const bool ok = test.expected == nullptr ? !found : (found && parsed == test.expected);
+        if (!ok) ++failures;
+        std::wprintf(L"tag %ls json=%ls -> %ls\n", ok ? L"ok" : L"FAIL", test.json,
+                     found ? parsed.c_str() : L"<missing>");
+    }
+
+    struct VersionCase { const wchar_t* left; const wchar_t* right; int expected; };
+    const VersionCase versionCases[] = {
+        { L"v1.2.0", L"1.1.0", 1 },
+        { L"1.1.0", L"1.1.0", 0 },
+        { L"1.0.9", L"1.1.0", -1 },
+        { L"1.10.0", L"1.9.9", 1 },
+        { L"2.0", L"1.9.9", 1 },
+        { L"1.1.0", L"1.1.0.0", 0 },
+        { L"", L"1.1.0", 0 },
+        { L"garbage", L"1.1.0", 0 },
+        { L"v1.2.0-beta", L"1.1.0", 1 },
+    };
+    for (const VersionCase& test : versionCases) {
+        const int result = CompareVersions(test.left, test.right);
+        const bool ok = result == test.expected;
+        if (!ok) ++failures;
+        const wchar_t* verdict = result > 0 ? L"newer" : result < 0 ? L"older" : L"equal";
+        std::wprintf(L"version %ls vs %ls -> %ls %ls\n", test.left, test.right, verdict, ok ? L"ok" : L"FAIL");
+    }
+
+    std::wprintf(L"failures=%zu\n", failures);
+    return failures == 0 ? 0 : 1;
+}
+
+// --check-updates: synchronous real-network diagnostic. The resident check
+// ignores this command's outcome; the diagnostic deliberately runs even when
+// `check_updates` is false so the endpoint can always be probed by hand.
+int UpdateCheckDiagnostic() {
+    std::wstring tag, error;
+    if (!FetchLatestReleaseTag(tag, error)) {
+        std::wprintf(L"version=%ls latest=? status=failed\n", ProductVersion().c_str());
+        std::wprintf(L"reason=%ls\n", error.c_str());
+        return 4;
+    }
+    std::wstring latest = Trim(tag);
+    if (!latest.empty() && (latest[0] == L'v' || latest[0] == L'V')) latest.erase(latest.begin());
+    std::vector<int> parsed;
+    if (latest.empty() || !ParseVersion(latest, parsed)) {
+        std::wprintf(L"version=%ls latest=? status=failed\n", ProductVersion().c_str());
+        return 4;
+    }
+    const int comparison = CompareVersions(latest, ProductVersion());
+    const wchar_t* status = comparison > 0 ? L"newer" : L"current";
+    std::wprintf(L"version=%ls latest=%ls status=%ls\n", ProductVersion().c_str(), latest.c_str(), status);
+    std::wprintf(L"menu_label=%ls\n", FormatText(EnglishText(TextId::MenuDownloadFormat), StripVersionPrefix(tag).c_str()).c_str());
+    std::wprintf(L"balloon=%ls\n", FormatText(EnglishText(TextId::BalloonUpdateFormat), DisplayTag(tag).c_str()).c_str());
+    return comparison > 0 ? 3 : 0;
 }
 
 BOOL CALLBACK CountVisibleTopLevelWindow(HWND hwnd, LPARAM value) {
@@ -641,9 +1013,11 @@ bool LoadIniConfig(Config& result, const std::wstring& path) {
         const auto key = Trim(line.substr(0, eq));
         const auto value = Trim(line.substr(eq + 1));
         if (section == L"global") {
-            // ui_language belongs to the whole configuration, not to a Rule,
-            // so it is handled here instead of inside SetField().
+            // ui_language and check_updates belong to the whole configuration,
+            // not to a Rule, so they are handled here instead of inside
+            // SetField(). check_updates is a normal bool parsed by ParseBool.
             if (Lower(key) == L"ui_language") next.uiLanguage = Lower(Trim(value));
+            else if (Lower(key) == L"check_updates") next.checkUpdates = ParseBool(value, next.checkUpdates);
             else SetField(next.global, key, value);
         }
         else if (appIndex >= 0) { SetField(next.apps[appIndex].rule, key, value); SetMatchField(next.apps[appIndex], key, value); }
@@ -727,6 +1101,7 @@ bool LoadYamlConfig(Config& result, const std::wstring& path) {
             else if (key == L"config") continue;
             else if (key == L"enabled" && state.empty()) next.global.enabled = ParseBool(UnquoteYaml(value), next.global.enabled);
             else if (key == L"ui_language" && state.empty()) next.uiLanguage = Lower(UnquoteYaml(value));
+            else if (key == L"check_updates" && state.empty()) next.checkUpdates = ParseBool(UnquoteYaml(value), next.checkUpdates);
             else if (state == L"focused" || state == L"unfocused") SetYamlStateField(next.global, state == L"focused", key, value);
             continue;
         }
@@ -869,6 +1244,9 @@ bool ReloadConfig() {
     if (!LoadConfig(fresh, g_configPath)) return false;
     g_config = std::move(fresh);
     g_configWriteTime = g_config.writeTime;
+    // The worker reads this before every request, so a hot reload takes effect
+    // without the main loop waiting for a join.
+    g_updateCheckEnabled.store(g_config.checkUpdates);
     ++g_configRevision;
     // ApplyWindow compares the actual requested material on the next update.
     // Do not blindly reapply AccentPolicy here: that visibly flashes a window
@@ -983,6 +1361,20 @@ NOTIFYICONDATAW MakeTrayIconData() {
     return icon;
 }
 
+// Reuses the existing tray icon and shows an informational balloon. Runs on
+// the main thread only, after kUpdateCheckMessage has delivered the tag.
+void ShowUpdateBalloon(const std::wstring& tag) {
+    if (!g_trayWindow || !g_trayIconAdded) return;
+    auto icon = MakeTrayIconData();
+    icon.uFlags |= NIF_INFO;
+    icon.dwInfoFlags = NIIF_INFO;
+    const std::wstring title = Str(TextId::BalloonUpdateTitle);
+    const std::wstring text = FormatText(Str(TextId::BalloonUpdateFormat), DisplayTag(tag).c_str());
+    wcsncpy_s(icon.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(icon.szInfo, text.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &icon);
+}
+
 bool AddTrayIcon() {
     if (!g_trayWindow) return false;
     auto icon = MakeTrayIconData();
@@ -1019,6 +1411,12 @@ void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, kTrayEditor, Str(TextId::MenuEditor));
     AppendMenuW(menu, MF_STRING, kTrayOpenConfig, Str(TextId::MenuConfig));
     AppendMenuW(menu, MF_STRING, kTrayReload, Str(TextId::MenuReload));
+    if (!g_updateVersion.empty()) {
+        // A strictly newer release is the only condition that adds this item,
+        // and it stays for the rest of the session once found.
+        AppendMenuW(menu, MF_STRING, kTrayDownload,
+                    FormatText(Str(TextId::MenuDownloadFormat), StripVersionPrefix(g_updateVersion).c_str()).c_str());
+    }
     const bool startupEnabled = StartupEnabledForMenu();
     AppendMenuW(menu, MF_STRING, kTrayStartup,
                 startupEnabled ? Str(TextId::MenuStartupOff) : Str(TextId::MenuStartupOn));
@@ -1033,6 +1431,19 @@ void ShowTrayMenu(HWND hwnd) {
 
 LRESULT CALLBACK TrayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreatedMessage && message == g_taskbarCreatedMessage) { g_trayIconAdded = false; AddTrayIcon(); return 0; }
+    if (message == kUpdateCheckMessage) {
+        // The worker owns nothing user-visible: it hands over a heap tag and
+        // the main thread publishes the version, then shows the balloon.
+        std::wstring* payload = reinterpret_cast<std::wstring*>(lParam);
+        if (payload) {
+            if (!payload->empty()) {
+                g_updateVersion = *payload;
+                ShowUpdateBalloon(*payload);
+            }
+            delete payload;
+        }
+        return 0;
+    }
     const UINT trayEvent = LOWORD(lParam);
     if (message == kTrayMessage && (trayEvent == WM_RBUTTONUP || trayEvent == WM_LBUTTONUP || trayEvent == WM_CONTEXTMENU)) { ShowTrayMenu(hwnd); return 0; }
     if (message == WM_COMMAND) {
@@ -1051,6 +1462,12 @@ LRESULT CALLBACK TrayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         case kTrayReload:
             ReloadConfig();
+            return 0;
+        case kTrayDownload:
+            // Always open the repository's latest-release page; the exact tag
+            // found by the check is only used for the label.
+            ShellExecuteW(hwnd, L"open", L"https://github.com/heathacosta259519-dot/WinGlass/releases/latest",
+                          nullptr, nullptr, SW_SHOWNORMAL);
             return 0;
         case kTrayStartup:
         {
@@ -1969,8 +2386,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     // Now that the file is loaded, let `ui_language` take effect unless the
     // command line carried an explicit tag.
     ResolveUiLanguage(commandLine, &g_config.uiLanguage);
+    // The worker starts after the tray window exists; publish the configured
+    // switch before it can read the atomic.
+    g_updateCheckEnabled.store(g_config.checkUpdates);
     if (wcsstr(commandLine, L"--lang-self-test")) return LanguageSelfTest();
     if (wcsstr(commandLine, L"--self-test")) return SelfTest();
+    if (wcsstr(commandLine, L"--update-self-test")) return UpdateSelfTest();
+    if (wcsstr(commandLine, L"--check-updates")) return UpdateCheckDiagnostic();
     const bool relaunchAttempt = wcsstr(commandLine, L"--interactive-relaunch") != nullptr;
     if (!CanSeeInteractiveDesktop()) {
         if (!relaunchAttempt && RelaunchOnExplorerDesktop()) {
@@ -1991,6 +2413,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     SetProcessShutdownParameters(0x3ff, SHUTDOWN_NORETRY);
     StartWatchdog();
     CreateTrayIcon();
+    StartUpdateCheckThread();
     MSG msg{};
     ULONGLONG lastTrack = 0, lastSweep = 0, lastConfigCheck = 0, lastTrayRetry = 0;
     HWND lastForeground = nullptr;
@@ -2040,6 +2463,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
         Sleep(8);
     }
     CleanupAllWindows();
+    // Join the worker before the tray window is destroyed, then drain any tag
+    // it queued meanwhile so the heap payloads are not leaked.
+    StopUpdateCheckThread();
+    MSG pending{};
+    while (PeekMessageW(&pending, g_trayWindow, kUpdateCheckMessage, kUpdateCheckMessage, PM_REMOVE)) {
+        delete reinterpret_cast<std::wstring*>(pending.lParam);
+    }
     DestroyTrayIcon();
     ReleaseMutex(singleInstance); CloseHandle(singleInstance);
     return 0;
