@@ -18,4 +18,5 @@ DEVLOG.md
 
 # 本机实际使用的配置：仓库只带 config.example.*，各人按自己的环境改
 config.yaml
+config.yaml.bak
 config.ini

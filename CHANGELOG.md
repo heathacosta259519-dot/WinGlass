@@ -8,6 +8,39 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 Entries are added when a fix, feature or other change is **finished** — this is
 not a commit-by-commit log, and not the internal development journal.
 
+## [1.2.0] - 2026-09-19
+
+### Added
+
+- **Flexible per-app matching** — rules can now match a process name, window
+  class, title substring, or Store/MSIX package identity (AUMID). All supplied
+  matchers must match; more-specific rules take precedence over broad ones.
+- **Store application picker** — the settings editor can enumerate installed
+  Store applications and create rules for their package identity, avoiding the
+  shared `ApplicationFrameHost.exe` process-name limitation.
+- **Bilingual interface** — the resident tray process and settings editor now
+  provide Simplified Chinese and English text, selectable with `ui_language`
+  or inherited from the Windows display language. Diagnostics verify language
+  tables and the editor verifies that English labels fit their controls.
+- **Optional update check** — the resident process can check the latest GitHub
+  release at startup, display a notification-area alert, and offer a download
+  command. `check_updates` controls the feature; local parser and version
+  comparison diagnostics are available without making a network request.
+
+### Changed
+
+- **Settings editor layout** — global settings, per-app rules and blacklist
+  management are separated into tabs. Per-app rules now expose their matcher
+  fields directly rather than limiting rules to executable names.
+- **Release metadata** — all three executables now report version `1.2.0`.
+
+### Fixed
+
+- **Configuration editor data safety** — saving now creates a byte-for-byte
+  `config.yaml.bak` snapshot before replacement and refuses to overwrite a
+  configuration changed outside the editor. This makes fields not yet modeled
+  by the editor recoverable rather than silently losing them forever.
+
 ## [1.1.0] - 2026-09-12
 
 ### Added

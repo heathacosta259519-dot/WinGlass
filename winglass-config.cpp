@@ -123,6 +123,8 @@ namespace {
     T(ErrLoadConfig, L"\x65e0\x6cd5\x8bfb\x53d6 config.yaml \x6216 config.ini\x3002", L"Could not read config.yaml or config.ini.") \
     T(TitleLoadFailed, L"\x52a0\x8f7d\x5931\x8d25", L"Load failed") \
     T(StatusConfigReloaded, L"\x914d\x7f6e\x5df2\x91cd\x65b0\x52a0\x8f7d\x3002", L"Configuration reloaded.") \
+    T(MsgConfigChanged, L"\x914d\x7f6e\x6587\x4ef6\x5df2\x88ab\x5176\x4ed6\x7a0b\x5e8f\x4fee\x6539\x3002\x8bf7\x5148\x91cd\x65b0\x52a0\x8f7d\xff0c\x518d\x4fdd\x5b58\x3002", L"config.yaml changed outside the editor. Reload it before saving.") \
+    T(TitleConfigChanged, L"\x5916\x90e8\x6539\x52a8", L"External change") \
     T(ErrWriteConfig, L"\x65e0\x6cd5\x5199\x5165 config.yaml\x3002", L"Could not write config.yaml.") \
     T(TitleSaveFailed, L"\x4fdd\x5b58\x5931\x8d25", L"Save failed")
 
@@ -549,6 +551,28 @@ bool WriteAll(const std::wstring& path, const std::wstring& text) {
     return output.good();
 }
 
+// Keep the exact previous bytes before replacing a hand-edited configuration.
+// The editor intentionally understands only WinGlass fields; this snapshot is
+// the recovery path for a future field or another tool's extension that is not
+// represented by the current editor model.
+bool BackupExistingConfig(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    const std::wstring backupPath = path + L".bak";
+    const std::wstring tempPath = backupPath + L".tmp";
+    DeleteFileW(tempPath.c_str());
+    if (!CopyFileW(path.c_str(), tempPath.c_str(), FALSE)) return false;
+    if (MoveFileExW(tempPath.c_str(), backupPath.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    DeleteFileW(tempPath.c_str());
+    return false;
+}
+
 void AddUnique(std::vector<std::wstring>& values, const std::wstring& value) {
     const std::wstring item = Unquote(value);
     if (item.empty()) return;
@@ -748,7 +772,7 @@ std::wstring AppearanceFieldsYaml(const Appearance& appearance, int spaces) {
     return out.str();
 }
 
-bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
+bool SaveConfigFile(const EditorConfig& config, const std::wstring& path, bool createBackup = true) {
     const auto safeYamlName = [](const std::wstring& value) {
         // Process and class names are emitted as quoted YAML scalars. Reject
         // control/quote characters instead of allowing hand-edited input to
@@ -808,11 +832,48 @@ bool SaveConfigFile(const EditorConfig& config, const std::wstring& path) {
         DeleteFileW(tempPath.c_str());
         return false;
     }
+    // Do not replace a valid configuration unless its exact previous content
+    // is recoverable. A backup failure is treated as a save failure, because
+    // proceeding would turn an editor limitation into irreversible data loss.
+    if (createBackup && !BackupExistingConfig(path)) {
+        DeleteFileW(tempPath.c_str());
+        return false;
+    }
     if (!MoveFileExW(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         DeleteFileW(tempPath.c_str());
         return false;
     }
     return true;
+}
+
+// Keeps the backup contract executable without touching the user's actual
+// configuration. The deliberately unknown key represents a newer WinGlass
+// version or another configuration-writing tool; after this editor writes its
+// own model, that original text must still be recoverable from the .bak file.
+int ConfigBackupSelfTest(const std::wstring& configPath) {
+    const std::wstring target = configPath + L".backup-self-test";
+    const std::wstring backup = target + L".bak";
+    const std::wstring backupTemp = backup + L".tmp";
+    DeleteFileW(target.c_str());
+    DeleteFileW(backup.c_str());
+    DeleteFileW(backupTemp.c_str());
+
+    const std::wstring original =
+        L"future_extension: \"preserve this value\"\r\n"
+        L"global:\r\n"
+        L"  enabled: true\r\n";
+    bool ok = WriteAll(target, original);
+    EditorConfig replacement;
+    replacement.enabled = false;
+    if (ok) ok = SaveConfigFile(replacement, target);
+    if (ok) ok = ReadAll(backup) == original;
+    if (ok) ok = ReadAll(target).find(L"enabled: false") != std::wstring::npos;
+
+    const bool cleaned = (DeleteFileW(target.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND) &&
+                         (DeleteFileW(backup.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND) &&
+                         (DeleteFileW(backupTemp.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND);
+    std::wprintf(L"config_backup=%ls cleanup=%ls\n", ok ? L"ok" : L"FAIL", cleaned ? L"ok" : L"FAIL");
+    return ok && cleaned ? 0 : 1;
 }
 
 // Shows one page's controls and hides the others'. The tab strip and the
@@ -2227,11 +2288,18 @@ bool SaveFromControls() {
             return false;
         }
     }
+    // Reload is intentional: saving an older in-memory model over a file that
+    // another editor just changed would otherwise discard those newer edits.
+    if (!g_originalText.empty() && ReadAll(g_configPath) != g_originalText) {
+        MessageBoxW(g_window, Str(TextId::MsgConfigChanged), Str(TextId::TitleConfigChanged), MB_ICONWARNING);
+        return false;
+    }
     if (!SaveConfigFile(updated, g_configPath)) {
         MessageBoxW(g_window, Str(TextId::ErrWriteConfig), Str(TextId::TitleSaveFailed), MB_ICONERROR);
         return false;
     }
     g_config = std::move(updated);
+    g_originalText = ReadAll(g_configPath);
     SetStatus(Str(TextId::StatusSaved));
     return true;
 }
@@ -2622,7 +2690,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
             return 2;
         }
         const std::wstring target = directory + L"config.roundtrip.yaml";
-        if (!SaveConfigFile(loaded, target)) {
+        // This target is a disposable diagnostic artifact, so it exercises the
+        // serializer without creating a misleading backup beside the release.
+        if (!SaveConfigFile(loaded, target, false)) {
             std::wprintf(L"round trip failed: cannot write %ls\n", target.c_str());
             CoUninitialize();
             return 3;
@@ -2632,6 +2702,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
                      loaded.blacklistProcesses.size(), loaded.blacklistClasses.size());
         CoUninitialize();
         return 0;
+    }
+    if (commandLine && wcsstr(commandLine, L"--config-backup-self-test")) {
+        const int result = ConfigBackupSelfTest(g_configPath);
+        CoUninitialize();
+        return result;
     }
     // ListView itself can be registered by another application component, but
     // its image-list support is only dependable after explicit initialization.

@@ -1,4 +1,4 @@
-WinGlass 1.1.0  -  global frosted glass for Windows 11
+WinGlass 1.2.0  -  global frosted glass for Windows 11
 =====================================================
 
 Browsers, terminals, file managers and chat apps all get a real acrylic
@@ -40,14 +40,17 @@ winglass-watchdog.exe   Crash recovery. Started automatically by winglass.exe -
 
 Tray menu
 ---------
-Right-click the notification-area icon. The labels are currently in Simplified
-Chinese only:
+Right-click the notification-area icon. The menu follows the configured
+interface language (or the Windows display language when it is set to auto):
 
     打开配置编辑器      Open the config editor
     打开配置文件        Open the config file
     重新加载效果        Reload the effect
     启用/关闭开机启动    Enable / disable autostart
     退出                Exit
+
+When a newer version is found, the menu also offers a link to its download
+page. Update checks can be disabled with `check_updates: false` in config.yaml.
 
 Autostart only writes the current user's Run key; it needs no administrator
 rights.
@@ -56,6 +59,7 @@ rights.
 Files created next to the executables
 -------------------------------------
 config.yaml             Your settings
+config.yaml.bak         Previous configuration saved before editor replacement
 winglass.state          Recovery journal - removed on a clean exit
 winglass.log            Low-frequency diagnostics
 winglass.startup-state  Cached autostart toggle state
