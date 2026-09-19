@@ -187,7 +187,8 @@ global:
     enable_glass: true          # 是否启用磨砂
     exclude_fullscreen: true    # 全屏视频/游戏时恢复原窗口
     glass_color: "#00345A"      # 玻璃染色
-    glass_opacity: 0.98         # 玻璃浓度上限
+    backdrop_alpha: 1.0         # 磨砂背板不透明度；越低越能看清真实桌面
+    glass_opacity: 0.98         # 旧版 tint 浓度系数
     tint_opacity: 0.30          # 染色强度
     animation_duration_ms: 120  # 焦点切换动画时长
   unfocused:                    # 失焦态：两套参数各管一套
@@ -195,6 +196,7 @@ global:
     enable_glass: true
     exclude_fullscreen: true
     glass_color: "#00345A"
+    backdrop_alpha: 1.0
     glass_opacity: 0.96
     tint_opacity: 0.20
     animation_duration_ms: 120
@@ -226,7 +228,8 @@ applications:
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | 是否启用磨砂背板；关掉后仍保留纯染色 |
 | `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | 检测到覆盖整个显示器的无边框窗口时，暂时恢复原样；适合浏览器全屏视频和游戏 |
 | `glass_color` | `active_tint_color` / `inactive_tint_color` | `#RRGGBB` | `#2C3E58` / `#1F2A3C` | 玻璃颜色 |
-| `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | 玻璃浓度上限 |
+| `backdrop_alpha` | `active_backdrop_alpha` / `inactive_backdrop_alpha` | `0–1` | `1.0` / `1.0` | 实时 Acrylic 背板的不透明度；越低越能看清真实桌面 |
+| `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | 旧版 tint 浓度系数；为兼容现有配置保留 |
 | `tint_opacity` | `active_tint_strength` / `inactive_tint_strength` | `0–1` | `0.34` / `0.30` | 染色强度 |
 | `animation_duration_ms` | `transition_ms` | `0–5000` | `180` | 焦点切换动画时长，`0` = 立即切换 |
 | `blacklist: - process` | `[Blacklist]` 下 `进程名=true` | — | — | 按可执行文件名跳过 |
@@ -241,7 +244,7 @@ applications:
 
 ### 配置编辑器
 
-`winglass-config.exe` 提供图形界面，覆盖全局开关、聚焦/失焦透明度、玻璃开关、颜色、浓度、动画时长与黑名单，保存时**原子替换** `config.yaml`（先写临时文件再替换，中途失败不会截断原配置）；替换前会保存上一份 `config.yaml.bak`，且如果文件在编辑器外被改动会拒绝覆盖。运行中的主程序会自动热加载。
+`winglass-config.exe` 提供图形界面，覆盖全局开关、聚焦/失焦目标透明度、实时 Acrylic 背板不透明度、玻璃开关、颜色、tint 浓度、动画时长与黑名单，保存时**原子替换** `config.yaml`（先写临时文件再替换，中途失败不会截断原配置）；替换前会保存上一份 `config.yaml.bak`，且如果文件在编辑器外被改动会拒绝覆盖。运行中的主程序会自动热加载。
 
 聚焦/失焦设置中还提供“全屏视频时排除”复选框；取消勾选后，该状态下的浏览器全屏窗口仍会继续应用效果。
 
@@ -272,6 +275,8 @@ applications:
 |---|---|
 | *（无）* | 常驻运行 |
 | `--self-test` | 解析配置并验证当前系统接受玻璃合成策略（退出码：`0` 成功 / `2` 配置读取失败 / `3` 合成不可用） |
+| `--backdrop-alpha-lab-self-test` | 不显示窗口，验证当前 DWM 是否接受两种候选的背板 Alpha 合成路径 |
+| `--backdrop-alpha-lab` | 打开交互式 Alpha 实验场：动态背景上的五档普通 Acrylic 与五档 layered Acrylic；不会改配置或应用窗口 |
 | `--palette-self-test` | 仅配置编辑器：解析剪贴板图片并打印提取出的配色，用于排查截图/取色异常 |
 | `--interactive-relaunch` | 内部使用：从隔离桌面转交到用户桌面后的二次启动标记 |
 | `--set-startup=enable\|disable` | 内部使用：受限环境下需要提权时，只负责写注册表启动项的辅助模式 |

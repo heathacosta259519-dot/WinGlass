@@ -55,7 +55,8 @@ namespace {
     T(LabelTargetOpacity, L"\x76ee\x6807\x900f\x660e\x5ea6 (0.05 - 1.0)", L"Target opacity (0.05 - 1.0)") \
     T(LabelEnableGlass, L"\x542f\x7528\x6bdb\x73bb\x7483", L"Enable frosted glass") \
     T(LabelGlassColor, L"\x73bb\x7483/\x67d3\x8272\x989c\x8272 (#RRGGBB)", L"Glass / tint colour (#RRGGBB)") \
-    T(LabelGlassOpacity, L"\x73bb\x7483\x900f\x660e\x5ea6 (0 - 1)", L"Glass opacity (0 - 1)") \
+    T(LabelBackdropAlpha, L"\x80cc\x677f\x900f\x660e\x5ea6 (0 - 1)", L"Backdrop opacity (0 - 1)") \
+    T(LabelGlassOpacity, L"\x517c\x5bb9 tint \x6d53\x5ea6 (0 - 1)", L"Legacy tint density (0 - 1)") \
     T(LabelTintStrength, L"\x67d3\x8272\x5f3a\x5ea6 (0 - 1)", L"Tint strength (0 - 1)") \
     T(LabelAnimationDuration, L"\x52a8\x753b\x65f6\x957f (\x6beb\x79d2)", L"Animation duration (ms)") \
     T(LabelExcludeFullscreen, L"\x5168\x5c4f\x89c6\x9891\x65f6\x6392\x9664", L"Exclude during full-screen video") \
@@ -203,6 +204,10 @@ struct Appearance {
     bool glass = true;
     double targetOpacity = 0.70;
     Color color{};
+    // The Acrylic helper HWND uses this alpha. It defaults to fully opaque so
+    // existing configurations retain their appearance after the new field is
+    // introduced; glassOpacity remains the legacy tint-density multiplier.
+    double backdropAlpha = 1.0;
     double glassOpacity = 0.98;
     double tintOpacity = 0.10;
     int animationMs = 400;
@@ -256,13 +261,13 @@ struct EditorConfig {
 
 enum ControlId {
     IDC_ENABLED = 100,
-    IDC_F_TARGET, IDC_F_GLASS, IDC_F_COLOR, IDC_F_GLASS_OPACITY, IDC_F_TINT, IDC_F_ANIMATION, IDC_F_FULLSCREEN,
-    IDC_U_TARGET, IDC_U_GLASS, IDC_U_COLOR, IDC_U_GLASS_OPACITY, IDC_U_TINT, IDC_U_ANIMATION, IDC_U_FULLSCREEN,
+    IDC_F_TARGET, IDC_F_GLASS, IDC_F_COLOR, IDC_F_GLASS_OPACITY, IDC_F_TINT, IDC_F_ANIMATION, IDC_F_FULLSCREEN, IDC_F_BACKDROP_ALPHA,
+    IDC_U_TARGET, IDC_U_GLASS, IDC_U_COLOR, IDC_U_GLASS_OPACITY, IDC_U_TINT, IDC_U_ANIMATION, IDC_U_FULLSCREEN, IDC_U_BACKDROP_ALPHA,
     IDC_BLACK_PROCESSES, IDC_BLACK_CLASSES,
     IDC_PICK_PROCESS, IDC_SELECTED_PROCESS, IDC_ADD_PROCESS_BLACKLIST, IDC_ADD_APP_RULE,
     IDC_APP_RULES, IDC_REMOVE_APP_RULE,
-    IDC_APP_F_TARGET, IDC_APP_F_GLASS, IDC_APP_F_COLOR, IDC_APP_F_GLASS_OPACITY, IDC_APP_F_TINT, IDC_APP_F_ANIMATION, IDC_APP_F_FULLSCREEN,
-    IDC_APP_U_TARGET, IDC_APP_U_GLASS, IDC_APP_U_COLOR, IDC_APP_U_GLASS_OPACITY, IDC_APP_U_TINT, IDC_APP_U_ANIMATION, IDC_APP_U_FULLSCREEN,
+    IDC_APP_F_TARGET, IDC_APP_F_GLASS, IDC_APP_F_COLOR, IDC_APP_F_GLASS_OPACITY, IDC_APP_F_TINT, IDC_APP_F_ANIMATION, IDC_APP_F_FULLSCREEN, IDC_APP_F_BACKDROP_ALPHA,
+    IDC_APP_U_TARGET, IDC_APP_U_GLASS, IDC_APP_U_COLOR, IDC_APP_U_GLASS_OPACITY, IDC_APP_U_TINT, IDC_APP_U_ANIMATION, IDC_APP_U_FULLSCREEN, IDC_APP_U_BACKDROP_ALPHA,
     IDC_SAVE, IDC_RELOAD, IDC_OPEN_FOLDER, IDC_EXIT, IDC_STATUS,
     // Appended after the original ids so the values above keep their meaning.
     // These are only ever used inside this process.
@@ -277,6 +282,7 @@ struct Controls {
     HWND fTarget = nullptr;
     HWND fGlass = nullptr;
     HWND fColor = nullptr;
+    HWND fBackdropAlpha = nullptr;
     HWND fGlassOpacity = nullptr;
     HWND fTint = nullptr;
     HWND fAnimation = nullptr;
@@ -284,6 +290,7 @@ struct Controls {
     HWND uTarget = nullptr;
     HWND uGlass = nullptr;
     HWND uColor = nullptr;
+    HWND uBackdropAlpha = nullptr;
     HWND uGlassOpacity = nullptr;
     HWND uTint = nullptr;
     HWND uAnimation = nullptr;
@@ -299,6 +306,7 @@ struct Controls {
     HWND appFTarget = nullptr;
     HWND appFGlass = nullptr;
     HWND appFColor = nullptr;
+    HWND appFBackdropAlpha = nullptr;
     HWND appFGlassOpacity = nullptr;
     HWND appFTint = nullptr;
     HWND appFAnimation = nullptr;
@@ -306,6 +314,7 @@ struct Controls {
     HWND appUTarget = nullptr;
     HWND appUGlass = nullptr;
     HWND appUColor = nullptr;
+    HWND appUBackdropAlpha = nullptr;
     HWND appUGlassOpacity = nullptr;
     HWND appUTint = nullptr;
     HWND appUAnimation = nullptr;
@@ -583,6 +592,7 @@ void SetAppearanceField(Appearance& appearance, const std::wstring& key, const s
     if (key == L"target_opacity" || key == L"opacity") appearance.targetOpacity = ParseDouble(value, appearance.targetOpacity, 0.05, 1.0);
     else if (key == L"enable_glass" || key == L"acrylic") appearance.glass = ParseBool(value, appearance.glass);
     else if (key == L"glass_color" || key == L"tint_color") ParseColor(value, appearance.color);
+    else if (key == L"backdrop_alpha") appearance.backdropAlpha = ParseDouble(value, appearance.backdropAlpha, 0.0, 1.0);
     else if (key == L"glass_opacity") appearance.glassOpacity = ParseDouble(value, appearance.glassOpacity, 0.05, 1.0);
     else if (key == L"tint_opacity" || key == L"tint_strength") appearance.tintOpacity = ParseDouble(value, appearance.tintOpacity, 0.0, 1.0);
     else if (key == L"animation_duration_ms" || key == L"transition_ms") appearance.animationMs = ParseInt(value, appearance.animationMs, 0, 5000);
@@ -753,6 +763,7 @@ std::wstring AppearanceYaml(const Appearance& appearance, const wchar_t* name) {
         << L"    enable_glass: " << (appearance.glass ? L"true" : L"false") << L"\n"
         << L"    exclude_fullscreen: " << (appearance.excludeFullscreen ? L"true" : L"false") << L"\n"
         << L"    glass_color: \"" << ColorText(appearance.color) << L"\"\n"
+        << L"    backdrop_alpha: " << appearance.backdropAlpha << L"\n"
         << L"    glass_opacity: " << appearance.glassOpacity << L"\n"
         << L"    tint_opacity: " << appearance.tintOpacity << L"\n"
         << L"    animation_duration_ms: " << appearance.animationMs << L"\n";
@@ -766,6 +777,7 @@ std::wstring AppearanceFieldsYaml(const Appearance& appearance, int spaces) {
         << indent << L"enable_glass: " << (appearance.glass ? L"true" : L"false") << L"\n"
         << indent << L"exclude_fullscreen: " << (appearance.excludeFullscreen ? L"true" : L"false") << L"\n"
         << indent << L"glass_color: \"" << ColorText(appearance.color) << L"\"\n"
+        << indent << L"backdrop_alpha: " << appearance.backdropAlpha << L"\n"
         << indent << L"glass_opacity: " << appearance.glassOpacity << L"\n"
         << indent << L"tint_opacity: " << appearance.tintOpacity << L"\n"
         << indent << L"animation_duration_ms: " << appearance.animationMs << L"\n";
@@ -920,54 +932,58 @@ HWND MakeEdit(int id, int x, int y, int width = 100) {
 }
 
 void MakeAppearanceGroup(TextId titleId, int baseId, int x, int y) {
-    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 248);
+    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 278);
     MakeLabel(Str(TextId::LabelTargetOpacity), x + 16, y + 32, kGroupLabelWidth);
     MakeLabel(Str(TextId::LabelEnableGlass), x + 16, y + 62, kGroupLabelWidth);
     MakeLabel(Str(TextId::LabelGlassColor), x + 16, y + 92, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 122, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 152, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 182, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 212, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelBackdropAlpha), x + 16, y + 122, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 152, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 182, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 212, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 242, kGroupLabelWidth);
 
     HWND target = MakeEdit(baseId, x + 212, y + 29);
     HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 212, y + 59, 22, 22);
     HWND color = MakeEdit(baseId + 2, x + 212, y + 89, 125);
-    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 119);
-    HWND tint = MakeEdit(baseId + 4, x + 212, y + 149);
-    HWND animation = MakeEdit(baseId + 5, x + 212, y + 179, 125);
-    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 209, 22, 22);
+    HWND backdropAlpha = MakeEdit(baseId + 7, x + 212, y + 119);
+    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 149);
+    HWND tint = MakeEdit(baseId + 4, x + 212, y + 179);
+    HWND animation = MakeEdit(baseId + 5, x + 212, y + 209, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 239, 22, 22);
     if (baseId == IDC_F_TARGET) {
         g_controls.fTarget = target; g_controls.fGlass = glass; g_controls.fColor = color;
-        g_controls.fGlassOpacity = glassOpacity; g_controls.fTint = tint; g_controls.fAnimation = animation; g_controls.fFullscreen = fullscreen;
+        g_controls.fBackdropAlpha = backdropAlpha; g_controls.fGlassOpacity = glassOpacity; g_controls.fTint = tint; g_controls.fAnimation = animation; g_controls.fFullscreen = fullscreen;
     } else {
         g_controls.uTarget = target; g_controls.uGlass = glass; g_controls.uColor = color;
-        g_controls.uGlassOpacity = glassOpacity; g_controls.uTint = tint; g_controls.uAnimation = animation; g_controls.uFullscreen = fullscreen;
+        g_controls.uBackdropAlpha = backdropAlpha; g_controls.uGlassOpacity = glassOpacity; g_controls.uTint = tint; g_controls.uAnimation = animation; g_controls.uFullscreen = fullscreen;
     }
 }
 
 void MakeAppAppearanceGroup(TextId titleId, int baseId, int x, int y, bool focused) {
-    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 248);
+    MakeControl(L"BUTTON", Str(titleId), BS_GROUPBOX, 0, x, y, 365, 278);
     MakeLabel(Str(TextId::LabelTargetOpacity), x + 16, y + 32, kGroupLabelWidth);
     MakeLabel(Str(TextId::LabelEnableGlass), x + 16, y + 62, kGroupLabelWidth);
     MakeLabel(Str(TextId::LabelGlassColor), x + 16, y + 92, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 122, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 152, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 182, kGroupLabelWidth);
-    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 212, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelBackdropAlpha), x + 16, y + 122, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelGlassOpacity), x + 16, y + 152, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelTintStrength), x + 16, y + 182, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelAnimationDuration), x + 16, y + 212, kGroupLabelWidth);
+    MakeLabel(Str(TextId::LabelExcludeFullscreen), x + 16, y + 242, kGroupLabelWidth);
 
     HWND target = MakeEdit(baseId, x + 212, y + 29);
     HWND glass = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 1, x + 212, y + 59, 22, 22);
     HWND color = MakeEdit(baseId + 2, x + 212, y + 89, 125);
-    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 119);
-    HWND tint = MakeEdit(baseId + 4, x + 212, y + 149);
-    HWND animation = MakeEdit(baseId + 5, x + 212, y + 179, 125);
-    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 209, 22, 22);
+    HWND backdropAlpha = MakeEdit(baseId + 7, x + 212, y + 119);
+    HWND glassOpacity = MakeEdit(baseId + 3, x + 212, y + 149);
+    HWND tint = MakeEdit(baseId + 4, x + 212, y + 179);
+    HWND animation = MakeEdit(baseId + 5, x + 212, y + 209, 125);
+    HWND fullscreen = MakeControl(L"BUTTON", L"", BS_AUTOCHECKBOX, baseId + 6, x + 212, y + 239, 22, 22);
     if (focused) {
         g_controls.appFTarget = target; g_controls.appFGlass = glass; g_controls.appFColor = color;
-        g_controls.appFGlassOpacity = glassOpacity; g_controls.appFTint = tint; g_controls.appFAnimation = animation; g_controls.appFFullscreen = fullscreen;
+        g_controls.appFBackdropAlpha = backdropAlpha; g_controls.appFGlassOpacity = glassOpacity; g_controls.appFTint = tint; g_controls.appFAnimation = animation; g_controls.appFFullscreen = fullscreen;
     } else {
         g_controls.appUTarget = target; g_controls.appUGlass = glass; g_controls.appUColor = color;
-        g_controls.appUGlassOpacity = glassOpacity; g_controls.appUTint = tint; g_controls.appUAnimation = animation; g_controls.appUFullscreen = fullscreen;
+        g_controls.appUBackdropAlpha = backdropAlpha; g_controls.appUGlassOpacity = glassOpacity; g_controls.appUTint = tint; g_controls.appUAnimation = animation; g_controls.appUFullscreen = fullscreen;
     }
 }
 
@@ -983,10 +999,11 @@ void SetControlText(HWND control, const std::wstring& text) {
 }
 
 void PutAppearance(const Appearance& appearance, HWND target, HWND glass, HWND color,
-                   HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
+                   HWND backdropAlpha, HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
     SetControlText(target, std::to_wstring(appearance.targetOpacity));
     SendMessageW(glass, BM_SETCHECK, appearance.glass ? BST_CHECKED : BST_UNCHECKED, 0);
     SetControlText(color, ColorText(appearance.color));
+    SetControlText(backdropAlpha, std::to_wstring(appearance.backdropAlpha));
     SetControlText(glassOpacity, std::to_wstring(appearance.glassOpacity));
     SetControlText(tint, std::to_wstring(appearance.tintOpacity));
     SetControlText(animation, std::to_wstring(appearance.animationMs));
@@ -995,9 +1012,9 @@ void PutAppearance(const Appearance& appearance, HWND target, HWND glass, HWND c
 
 void EnableAppRuleControls(bool enabled) {
     const HWND controls[] = {
-        g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor, g_controls.appFGlassOpacity,
+        g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor, g_controls.appFBackdropAlpha, g_controls.appFGlassOpacity,
         g_controls.appFTint, g_controls.appFAnimation, g_controls.appUTarget, g_controls.appUGlass,
-        g_controls.appUColor, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation,
+        g_controls.appUColor, g_controls.appUBackdropAlpha, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation,
         g_controls.appFFullscreen, g_controls.appUFullscreen,
         g_controls.removeAppRule,
         g_controls.appMatchClass, g_controls.appMatchTitle, g_controls.appMatchAumid
@@ -1010,9 +1027,9 @@ void PutAppRule(const AppRule& rule) {
     SetControlText(g_controls.appMatchTitle, rule.title);
     SetControlText(g_controls.appMatchAumid, rule.aumid);
     PutAppearance(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
-                  g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen);
+                  g_controls.appFBackdropAlpha, g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen);
     PutAppearance(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
-                  g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
+                  g_controls.appUBackdropAlpha, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
 }
 
 void PopulateAppRuleList() {
@@ -1040,7 +1057,7 @@ void PopulateAppRuleList() {
 
 bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
     const auto read = [&](Appearance& appearance, HWND target, HWND glass, HWND color,
-                          HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
+                          HWND backdropAlpha, HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
         appearance.targetOpacity = ParseDouble(ControlText(target), appearance.targetOpacity, 0.05, 1.0);
         appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (!ParseColor(ControlText(color), appearance.color)) {
@@ -1050,6 +1067,7 @@ bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
             }
             return false;
         }
+        appearance.backdropAlpha = ParseDouble(ControlText(backdropAlpha), appearance.backdropAlpha, 0.0, 1.0);
         appearance.glassOpacity = ParseDouble(ControlText(glassOpacity), appearance.glassOpacity, 0.05, 1.0);
         appearance.tintOpacity = ParseDouble(ControlText(tint), appearance.tintOpacity, 0.0, 1.0);
         appearance.animationMs = ParseInt(ControlText(animation), appearance.animationMs, 0, 5000);
@@ -1062,9 +1080,9 @@ bool ReadAppRuleControls(AppRule& rule, bool showErrors) {
     rule.title = Trim(ControlText(g_controls.appMatchTitle));
     rule.aumid = Trim(ControlText(g_controls.appMatchAumid));
     return read(rule.focused, g_controls.appFTarget, g_controls.appFGlass, g_controls.appFColor,
-                g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen) &&
+                g_controls.appFBackdropAlpha, g_controls.appFGlassOpacity, g_controls.appFTint, g_controls.appFAnimation, g_controls.appFFullscreen) &&
            read(rule.unfocused, g_controls.appUTarget, g_controls.appUGlass, g_controls.appUColor,
-                g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
+                g_controls.appUBackdropAlpha, g_controls.appUGlassOpacity, g_controls.appUTint, g_controls.appUAnimation, g_controls.appUFullscreen);
 }
 
 void CaptureSelectedAppRule(bool showErrors) {
@@ -1477,9 +1495,9 @@ void LoadToControls() {
     PopulateUiLanguageCombo();
     SendMessageW(g_controls.checkUpdates, BM_SETCHECK, g_config.checkUpdates ? BST_CHECKED : BST_UNCHECKED, 0);
     PutAppearance(g_config.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                  g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
+                  g_controls.fBackdropAlpha, g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     PutAppearance(g_config.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                  g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
+                  g_controls.uBackdropAlpha, g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
     SetControlText(g_controls.blacklistProcesses, JoinLines(g_config.blacklistProcesses));
     SetControlText(g_controls.blacklistClasses, JoinLines(g_config.blacklistClasses));
     g_selectedAppRule = g_config.appRules.empty() ? -1 : 0;
@@ -1498,7 +1516,7 @@ std::vector<std::wstring> ReadLines(HWND control) {
 }
 
 bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
-                    HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
+                    HWND backdropAlpha, HWND glassOpacity, HWND tint, HWND animation, HWND fullscreen) {
     appearance.targetOpacity = ParseDouble(ControlText(target), appearance.targetOpacity, 0.05, 1.0);
     appearance.glass = SendMessageW(glass, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ParseColor(ControlText(color), appearance.color)) {
@@ -1508,6 +1526,7 @@ bool ReadAppearance(Appearance& appearance, HWND target, HWND glass, HWND color,
         SetFocus(color);
         return false;
     }
+    appearance.backdropAlpha = ParseDouble(ControlText(backdropAlpha), appearance.backdropAlpha, 0.0, 1.0);
     appearance.glassOpacity = ParseDouble(ControlText(glassOpacity), appearance.glassOpacity, 0.05, 1.0);
     appearance.tintOpacity = ParseDouble(ControlText(tint), appearance.tintOpacity, 0.0, 1.0);
     appearance.animationMs = ParseInt(ControlText(animation), appearance.animationMs, 0, 5000);
@@ -2270,9 +2289,9 @@ bool SaveFromControls() {
     updated.uiLanguage = languageIndex == 1 ? L"zh" : languageIndex == 2 ? L"en" : L"auto";
     updated.checkUpdates = SendMessageW(g_controls.checkUpdates, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!ReadAppearance(updated.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                        g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen) ||
+                        g_controls.fBackdropAlpha, g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen) ||
         !ReadAppearance(updated.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                        g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen)) {
+                        g_controls.uBackdropAlpha, g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen)) {
         return false;
     }
     updated.blacklistProcesses = ReadLines(g_controls.blacklistProcesses);
@@ -2352,9 +2371,9 @@ void AddSelectedProcessRule() {
     rule.focused = g_config.focused;
     rule.unfocused = g_config.unfocused;
     ReadAppearance(rule.focused, g_controls.fTarget, g_controls.fGlass, g_controls.fColor,
-                   g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
+                   g_controls.fBackdropAlpha, g_controls.fGlassOpacity, g_controls.fTint, g_controls.fAnimation, g_controls.fFullscreen);
     ReadAppearance(rule.unfocused, g_controls.uTarget, g_controls.uGlass, g_controls.uColor,
-                   g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
+                   g_controls.uBackdropAlpha, g_controls.uGlassOpacity, g_controls.uTint, g_controls.uAnimation, g_controls.uFullscreen);
     g_config.appRules.push_back(std::move(rule));
     g_selectedAppRule = static_cast<int>(g_config.appRules.size() - 1);
     PopulateAppRuleList();
@@ -2435,13 +2454,13 @@ void CreateControls() {
     MakeAppearanceGroup(TextId::GroupUnfocusedWindow, IDC_U_TARGET, 405, 145);
     // The interface language stays on the Global page because it describes the
     // whole editor. "Follow system" is the default and maps to `auto` on disk.
-    MakeLabel(Str(TextId::LabelInterfaceLanguage), 24, 420, 200);
+    MakeLabel(Str(TextId::LabelInterfaceLanguage), 24, 450, 200);
     g_controls.uiLanguage = MakeControl(L"COMBOBOX", L"", WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                        IDC_UI_LANGUAGE, 24, 444, 220, 200);
+                                        IDC_UI_LANGUAGE, 24, 474, 220, 200);
     // The update check belongs to the resident process, but it is a process-wide
     // toggle like the interface language, so it lives on the Global page too.
     g_controls.checkUpdates = MakeControl(L"BUTTON", Str(TextId::CheckboxCheckUpdates), BS_AUTOCHECKBOX,
-                                          IDC_CHECK_UPDATES, 280, 448, 380, 22);
+                                          IDC_CHECK_UPDATES, 280, 478, 380, 22);
 
     g_activePage = static_cast<int>(EditorPage::Applications);
     MakeControl(L"BUTTON", Str(TextId::GroupRunningProcesses), BS_GROUPBOX, 0, 20, 55, 750, 120);

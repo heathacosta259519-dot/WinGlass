@@ -64,7 +64,14 @@ namespace {
     T(StartupDisableFailed, L"\x65e0\x6cd5\x5173\x95ed\x5f00\x673a\x542f\x52a8\x3002\x8be6\x7ec6\x9519\x8bef\x5df2\x5199\x5165 winglass.log\x3002", L"Could not disable startup at sign-in. Details were written to winglass.log.") \
     T(MenuDownloadFormat, L"\x4e0b\x8f7d v%ls", L"Download v%ls") \
     T(BalloonUpdateTitle, L"WinGlass \x66f4\x65b0", L"WinGlass update") \
-    T(BalloonUpdateFormat, L"WinGlass \x6709\x65b0\x7248\x672c %ls\xff0c\x70b9\x51fb\x6258\x76d8\x83dc\x5355\x4e0b\x8f7d\x3002", L"WinGlass %ls is available. Open the tray menu to download it.")
+    T(BalloonUpdateFormat, L"WinGlass \x6709\x65b0\x7248\x672c %ls\xff0c\x70b9\x51fb\x6258\x76d8\x83dc\x5355\x4e0b\x8f7d\x3002", L"WinGlass %ls is available. Open the tray menu to download it.") \
+    T(LabTitle, L"WinGlass \x80cc\x677f Alpha \x5b9e\x9a8c\x573a", L"WinGlass backdrop Alpha lab") \
+    T(LabInstructions, L"\x4e0a\x6392\x666e\x901a Acrylic\xff0c\x4e0b\x6392 Layered Acrylic\x3002\x89c2\x5bdf\x52a8\x6001\x68cb\x76d8\x3001\x95ea\x70c1\x548c\x5931\x7126\x3002", L"Top: normal Acrylic. Bottom: layered Acrylic. Watch the moving pattern, flicker, and inactive behaviour.") \
+    T(LabLevels, L"\x4ece\x5de6\x5230\x53f3\xff1a 20% / 40% / 60% / 80% / 100%", L"Left to right: 20% / 40% / 60% / 80% / 100%") \
+    T(LabNormal, L"\x666e\x901a Acrylic\xff08\x7b56\x7565 Alpha\xff09", L"Normal Acrylic (policy Alpha)") \
+    T(LabLayered, L"\x5206\x5c42 Acrylic\xff08\x7a97\x53e3 Alpha\xff09", L"Layered Acrylic (window Alpha)") \
+    T(LabPulse, L"\x8109\x51b2 Alpha\xff08\x538b\x529b\x6d4b\x8bd5\xff09", L"Pulse Alpha (stress test)") \
+    T(LabClose, L"\x5173\x95ed\x5b9e\x9a8c\x573a", L"Close lab")
 
 enum class TextId {
 #define WINGLASS_DECLARE_TEXT(id, zh, en) id,
@@ -140,6 +147,11 @@ struct Rule {
     // System Acrylic owns its blur radius and exposes no supported strength API.
     int activeBlurStrength = 12;
     int inactiveBlurStrength = 12;
+    // This is the opacity of the Acrylic helper HWND itself. It intentionally
+    // remains separate from glassOpacity below, whose historical meaning is
+    // the multiplier used by the independent tint surface.
+    double activeBackdropAlpha = 1.0;
+    double inactiveBackdropAlpha = 1.0;
     double activeGlassOpacity = 0.98;
     double inactiveGlassOpacity = 0.96;
     Color activeTint{44, 62, 88};
@@ -238,6 +250,14 @@ struct WindowState {
     Color lastTintColor{};
     BYTE lastTintAlpha = 0;
     bool tintApplied = false;
+    // The visual experiment established that a layered Acrylic helper keeps
+    // live blur while its window alpha changes. These fields let that alpha
+    // use the same focus-transition curve as the target and tint surfaces.
+    BYTE backdropAlpha = 255;
+    BYTE fromBackdropAlpha = 255;
+    BYTE toBackdropAlpha = 255;
+    BYTE lastBackdropAlpha = 255;
+    bool backdropAlphaApplied = false;
     bool visualInitialized = false;
     bool applied = false;
     double currentOpacity = 1.0;
@@ -263,12 +283,18 @@ struct WindowState {
 
 static const wchar_t* kBackdropClass = L"WinGlassBackdropWindow";
 static const wchar_t* kTrayClass = L"WinGlassTrayWindow";
+static const wchar_t* kAlphaLabPatternClass = L"WinGlassAlphaLabPattern";
+static const wchar_t* kAlphaLabControlClass = L"WinGlassAlphaLabControl";
 static const wchar_t* kManagedProperty = L"WinGlass.ManagedTarget.v1";
 static constexpr UINT_PTR kManagedMarkerValue = 0x57474C31; // "WGL1"
 static constexpr UINT kTrayMessage = WM_APP + 42;
 // The update worker posts its result to the tray window instead of touching the
 // UI itself; the main thread owns g_updateVersion and the tray balloon.
 static constexpr UINT kUpdateCheckMessage = WM_APP + 43;
+static constexpr UINT_PTR kAlphaLabPatternTimer = 7001;
+static constexpr UINT_PTR kAlphaLabPulseTimer = 7002;
+static constexpr UINT kAlphaLabPulseCommand = 7101;
+static constexpr UINT kAlphaLabCloseCommand = 7102;
 static constexpr UINT kTrayOpenConfig = 41001;
 static constexpr UINT kTrayReload = 41002;
 static constexpr UINT kTrayStartup = 41003;
@@ -318,6 +344,26 @@ static HANDLE g_updateStopEvent = nullptr;
 // built, so the worker never touches it.
 static std::wstring g_updateVersion;
 static constexpr DWORD kUpdateCheckIntervalMs = 24u * 60u * 60u * 1000u;
+
+struct AlphaLabPane {
+    HWND hwnd = nullptr;
+    BYTE baseAlpha = 255;
+    bool layered = false;
+};
+
+// The alpha lab is deliberately isolated from g_windows: it never modifies a
+// foreign HWND, never creates a recovery journal entry, and can run alongside
+// the resident effect without participating in its sweep or Z-order rules.
+struct AlphaLabState {
+    HWND control = nullptr;
+    HWND pattern = nullptr;
+    std::vector<AlphaLabPane> panes;
+    bool pulse = false;
+    ULONGLONG pulseStart = 0;
+    int patternPhase = 0;
+};
+
+static AlphaLabState g_alphaLab;
 
 void CleanupAllWindows();
 
@@ -900,6 +946,8 @@ void SetField(Rule& rule, const std::wstring& key, const std::wstring& value) {
     else if (k == L"inactive_acrylic") rule.inactiveAcrylic = ParseBool(value, rule.inactiveAcrylic);
     else if (k == L"active_blur_strength" || k == L"active_blur_radius") rule.activeBlurStrength = ParseInt(value, rule.activeBlurStrength, 0, 64);
     else if (k == L"inactive_blur_strength" || k == L"inactive_blur_radius") rule.inactiveBlurStrength = ParseInt(value, rule.inactiveBlurStrength, 0, 64);
+    else if (k == L"active_backdrop_alpha") rule.activeBackdropAlpha = ParseDouble(value, rule.activeBackdropAlpha, 0.0, 1.0);
+    else if (k == L"inactive_backdrop_alpha") rule.inactiveBackdropAlpha = ParseDouble(value, rule.inactiveBackdropAlpha, 0.0, 1.0);
     else if (k == L"active_glass_opacity") rule.activeGlassOpacity = ParseDouble(value, rule.activeGlassOpacity, 0.05, 1.0);
     else if (k == L"inactive_glass_opacity") rule.inactiveGlassOpacity = ParseDouble(value, rule.inactiveGlassOpacity, 0.05, 1.0);
     else if (k == L"active_tint_color") rule.activeTint = ParseColor(value, rule.activeTint);
@@ -1057,6 +1105,10 @@ void SetYamlStateField(Rule& rule, bool focused, const std::wstring& key, const 
     else if (k == L"enable_glass" || k == L"acrylic") { if (focused) rule.activeAcrylic = ParseBool(value, rule.activeAcrylic); else rule.inactiveAcrylic = ParseBool(value, rule.inactiveAcrylic); }
     else if (k == L"blur_strength" || k == L"blur_radius") { if (focused) rule.activeBlurStrength = ParseInt(value, rule.activeBlurStrength, 0, 64); else rule.inactiveBlurStrength = ParseInt(value, rule.inactiveBlurStrength, 0, 64); }
     else if (k == L"glass_color" || k == L"tint_color") { if (focused) rule.activeTint = ParseColor(value, rule.activeTint); else rule.inactiveTint = ParseColor(value, rule.inactiveTint); }
+    else if (k == L"backdrop_alpha") { if (focused) rule.activeBackdropAlpha = ParseFlexibleOpacity(value, rule.activeBackdropAlpha); else rule.inactiveBackdropAlpha = ParseFlexibleOpacity(value, rule.inactiveBackdropAlpha); }
+    // Preserve the established configuration contract: glass_opacity affects
+    // tint density only. New configurations use backdrop_alpha to control the
+    // Acrylic material's visibility without changing the tint calculation.
     else if (k == L"glass_opacity") { if (focused) rule.activeGlassOpacity = ParseFlexibleOpacity(value, rule.activeGlassOpacity); else rule.inactiveGlassOpacity = ParseFlexibleOpacity(value, rule.inactiveGlassOpacity); }
     else if (k == L"tint_opacity" || k == L"tint_strength") { if (focused) rule.activeTintStrength = ParseFlexibleOpacity(value, rule.activeTintStrength); else rule.inactiveTintStrength = ParseFlexibleOpacity(value, rule.inactiveTintStrength); }
     else if (k == L"animation_duration_ms" || k == L"transition_ms") rule.transitionMs = ParseInt(value, rule.transitionMs, 0, 5000);
@@ -1671,7 +1723,8 @@ bool IsExcluded(HWND hwnd) {
     if (IsTooltipWindowClass(c)) return true;
     if (c == L"progman" || c == L"workerw" || c == L"shell_traywnd" ||
         c == L"shell_secondarytraywnd" || c == L"windows.ui.core.corewindow" ||
-        c == L"winglassbackdropwindow") return true;
+        c == L"winglassbackdropwindow" || c == L"winglassalphalabpattern" ||
+        c == L"winglassalphalabcontrol") return true;
     // Full-screen video is a temporary exclusion: the normal window rule is
     // preserved and will be reapplied as soon as the browser leaves full-screen.
     return FullscreenExclusionEnabled(hwnd);
@@ -1751,16 +1804,27 @@ SetWindowCompositionAttributeFn GetCompositionSetter() {
     return setter;
 }
 
-bool SetBackdropComposition(HWND backdrop, bool acrylic) {
+// AccentPolicy expects packed ABGR, not the RGB order used by COLORREF. The
+// production backdrop remains uncoloured; the alpha lab supplies a neutral
+// black tint solely to observe how the system material treats this channel.
+DWORD AccentGradientColor(Color color, BYTE alpha) {
+    return (static_cast<DWORD>(alpha) << 24) |
+           (static_cast<DWORD>(color.b) << 16) |
+           (static_cast<DWORD>(color.g) << 8) |
+           static_cast<DWORD>(color.r);
+}
+
+bool SetBackdropComposition(HWND backdrop, bool acrylic, DWORD gradientColor = 0) {
     const auto setter = GetCompositionSetter();
     if (!setter || !backdrop) return false;
 
     AccentPolicy policy{};
     policy.accentState = acrylic ? ACCENT_ENABLE_ACRYLICBLURBEHIND : ACCENT_ENABLE_GRADIENT;
-    // Keep AccentPolicy uncoloured. The separate tint HWND below applies the
-    // configured colour without reducing the contrast of DWM's real blur.
+    // Keep production AccentPolicy uncoloured. The separate tint HWND below
+    // applies the configured colour without reducing DWM blur contrast. The
+    // caller can opt into a gradient only for the isolated alpha experiment.
     policy.accentFlags = 0;
-    policy.gradientColor = 0;
+    policy.gradientColor = gradientColor;
     WindowCompositionAttributeData data{WCA_ACCENT_POLICY, &policy, sizeof(policy)};
     if (setter(backdrop, &data)) return true;
 
@@ -1768,7 +1832,7 @@ bool SetBackdropComposition(HWND backdrop, bool acrylic) {
     if (acrylic) {
         policy.accentState = ACCENT_ENABLE_BLURBEHIND;
         policy.accentFlags = 0;
-        policy.gradientColor = 0;
+        policy.gradientColor = gradientColor;
         if (setter(backdrop, &data)) return true;
     }
     return false;
@@ -1882,6 +1946,260 @@ bool EnsureBackdropClass() {
     static bool registered = false; if (registered) return true;
     WNDCLASSW wc{}; wc.lpfnWndProc = BackdropProc; wc.hInstance = g_instance; wc.lpszClassName = kBackdropClass; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     registered = RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS; return registered;
+}
+
+// The pattern is a real top-level window below the test panes. This matters:
+// Acrylic must sample a moving compositor surface, rather than a pre-rendered
+// bitmap, or the lab would not expose the failure mode we need to evaluate.
+LRESULT CALLBACK AlphaLabPatternProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (message == WM_TIMER && wParam == kAlphaLabPatternTimer) {
+        ++g_alphaLab.patternPhase;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        constexpr COLORREF colors[] = {
+            RGB(32, 96, 176), RGB(196, 66, 108), RGB(40, 152, 120),
+            RGB(218, 150, 48), RGB(102, 76, 190), RGB(42, 146, 182)
+        };
+        constexpr int cell = 36;
+        const int startColumn = -(g_alphaLab.patternPhase % cell);
+        const int startRow = -((g_alphaLab.patternPhase / 2) % cell);
+        for (int y = startRow; y < client.bottom; y += cell) {
+            for (int x = startColumn; x < client.right; x += cell) {
+                const int column = (x - startColumn) / cell;
+                const int row = (y - startRow) / cell;
+                const size_t color = static_cast<size_t>((column + row + g_alphaLab.patternPhase / 6) % std::size(colors));
+                HBRUSH brush = CreateSolidBrush(colors[color]);
+                if (brush) {
+                    RECT square{x, y, x + cell, y + cell};
+                    FillRect(dc, &square, brush);
+                    DeleteObject(brush);
+                }
+            }
+        }
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+// The normal row deliberately reapplies AccentPolicy while pulsing. The
+// production effect must never do this at frame rate; showing its visual cost
+// side by side with window-alpha updates is the point of the experiment.
+bool ApplyAlphaLabPane(const AlphaLabPane& pane, BYTE alpha) {
+    if (!pane.hwnd || !IsWindow(pane.hwnd)) return false;
+    if (pane.layered) return SetLayeredWindowAttributes(pane.hwnd, 0, alpha, LWA_ALPHA) != FALSE;
+    return SetBackdropComposition(pane.hwnd, true, AccentGradientColor(Color{0, 0, 0}, alpha));
+}
+
+void PulseAlphaLabPanes(ULONGLONG now) {
+    const double phase = static_cast<double>(now - g_alphaLab.pulseStart) * 6.283185307179586 / 2200.0;
+    const double scale = 0.20 + 0.80 * ((std::sin(phase) + 1.0) * 0.5);
+    bool changed = false;
+    for (const AlphaLabPane& pane : g_alphaLab.panes) {
+        const BYTE alpha = static_cast<BYTE>(std::clamp(std::lround(pane.baseAlpha * scale), 1l, 255l));
+        changed = ApplyAlphaLabPane(pane, alpha) || changed;
+    }
+    // A single compositor flush keeps both comparison rows on the same visual
+    // phase without imposing this cost on the resident effect's normal loop.
+    if (changed) DwmFlush();
+}
+
+void DestroyAlphaLabSurfaces() {
+    if (g_alphaLab.control) KillTimer(g_alphaLab.control, kAlphaLabPulseTimer);
+    if (g_alphaLab.pattern) KillTimer(g_alphaLab.pattern, kAlphaLabPatternTimer);
+    for (const AlphaLabPane& pane : g_alphaLab.panes) {
+        if (pane.hwnd && IsWindow(pane.hwnd)) {
+            DisableBackdropComposition(pane.hwnd);
+            DestroyWindow(pane.hwnd);
+        }
+    }
+    if (g_alphaLab.pattern && IsWindow(g_alphaLab.pattern)) DestroyWindow(g_alphaLab.pattern);
+    g_alphaLab.panes.clear();
+    g_alphaLab.pattern = nullptr;
+}
+
+LRESULT CALLBACK AlphaLabControlProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_COMMAND) {
+        switch (LOWORD(wParam)) {
+        case kAlphaLabPulseCommand:
+            g_alphaLab.pulse = SendMessageW(reinterpret_cast<HWND>(lParam), BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (g_alphaLab.pulse) {
+                g_alphaLab.pulseStart = GetTickCount64();
+                SetTimer(hwnd, kAlphaLabPulseTimer, 75, nullptr);
+            } else {
+                KillTimer(hwnd, kAlphaLabPulseTimer);
+                for (const AlphaLabPane& pane : g_alphaLab.panes) ApplyAlphaLabPane(pane, pane.baseAlpha);
+                DwmFlush();
+            }
+            return 0;
+        case kAlphaLabCloseCommand:
+            DestroyWindow(hwnd);
+            return 0;
+        default:
+            break;
+        }
+    }
+    if (message == WM_TIMER && wParam == kAlphaLabPulseTimer && g_alphaLab.pulse) {
+        PulseAlphaLabPanes(GetTickCount64());
+        return 0;
+    }
+    if (message == WM_CLOSE) {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    if (message == WM_DESTROY) {
+        DestroyAlphaLabSurfaces();
+        g_alphaLab.control = nullptr;
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+bool EnsureAlphaLabClasses() {
+    static bool registered = false;
+    if (registered) return true;
+    WNDCLASSW pattern{};
+    pattern.lpfnWndProc = AlphaLabPatternProc;
+    pattern.hInstance = g_instance;
+    pattern.lpszClassName = kAlphaLabPatternClass;
+    pattern.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    if (!RegisterClassW(&pattern) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+
+    WNDCLASSW control{};
+    control.lpfnWndProc = AlphaLabControlProc;
+    control.hInstance = g_instance;
+    control.lpszClassName = kAlphaLabControlClass;
+    control.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    control.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(IDI_WINGLASS_ICON));
+    if (!RegisterClassW(&control) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+    registered = true;
+    return true;
+}
+
+int RunBackdropAlphaLab() {
+    if (!GetCompositionSetter() || !EnsureBackdropClass() || !EnsureAlphaLabClasses()) return 3;
+
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int workWidth = work.right - work.left;
+    const int paneGap = 12;
+    const int paneWidth = std::clamp((workWidth - 180 - paneGap * 6) / 5, 120, 220);
+    const int paneHeight = std::clamp(paneWidth * 2 / 3, 90, 150);
+    const int patternWidth = paneWidth * 5 + paneGap * 6;
+    const int patternHeight = paneHeight * 2 + paneGap * 3;
+    const int controlHeight = 170;
+    const int left = std::max(work.left + 20, work.left + (workWidth - patternWidth) / 2);
+    const int top = work.top + 28;
+
+    g_alphaLab = {};
+    g_alphaLab.control = CreateWindowExW(WS_EX_DLGMODALFRAME, kAlphaLabControlClass, Str(TextId::LabTitle),
+                                          WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                          left, top, patternWidth, controlHeight,
+                                          nullptr, nullptr, g_instance, nullptr);
+    if (!g_alphaLab.control) return 5;
+
+    CreateWindowExW(0, L"STATIC", Str(TextId::LabInstructions), WS_CHILD | WS_VISIBLE,
+                    16, 14, patternWidth - 32, 38, g_alphaLab.control, nullptr, g_instance, nullptr);
+    CreateWindowExW(0, L"STATIC", Str(TextId::LabNormal), WS_CHILD | WS_VISIBLE,
+                    16, 60, 260, 20, g_alphaLab.control, nullptr, g_instance, nullptr);
+    CreateWindowExW(0, L"STATIC", Str(TextId::LabLayered), WS_CHILD | WS_VISIBLE,
+                    16, 82, 260, 20, g_alphaLab.control, nullptr, g_instance, nullptr);
+    CreateWindowExW(0, L"STATIC", Str(TextId::LabLevels), WS_CHILD | WS_VISIBLE,
+                    286, 61, 320, 20, g_alphaLab.control, nullptr, g_instance, nullptr);
+    HWND pulse = CreateWindowExW(0, L"BUTTON", Str(TextId::LabPulse), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                 patternWidth - 370, 108, 210, 26, g_alphaLab.control,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAlphaLabPulseCommand)), g_instance, nullptr);
+    CreateWindowExW(0, L"BUTTON", Str(TextId::LabClose), WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    patternWidth - 146, 108, 120, 26, g_alphaLab.control,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAlphaLabCloseCommand)), g_instance, nullptr);
+    if (pulse) SendMessageW(pulse, BM_SETCHECK, BST_UNCHECKED, 0);
+
+    const int patternTop = top + controlHeight + paneGap;
+    g_alphaLab.pattern = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                                          kAlphaLabPatternClass, L"", WS_POPUP,
+                                          left, patternTop, patternWidth, patternHeight,
+                                          g_alphaLab.control, nullptr, g_instance, nullptr);
+    if (!g_alphaLab.pattern) {
+        DestroyWindow(g_alphaLab.control);
+        return 5;
+    }
+    SetTimer(g_alphaLab.pattern, kAlphaLabPatternTimer, 33, nullptr);
+
+    constexpr BYTE alphas[] = {51, 102, 153, 204, 255};
+    for (int row = 0; row < 2; ++row) {
+        const bool layered = row == 1;
+        for (size_t column = 0; column < std::size(alphas); ++column) {
+            const int x = left + paneGap + static_cast<int>(column) * (paneWidth + paneGap);
+            const int y = patternTop + paneGap + row * (paneHeight + paneGap);
+            const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT |
+                                  (layered ? WS_EX_LAYERED : 0);
+            HWND pane = CreateWindowExW(exStyle, kBackdropClass, L"", WS_POPUP, x, y, paneWidth, paneHeight,
+                                        g_alphaLab.control, nullptr, g_instance, nullptr);
+            if (!pane || !SetBackdropComposition(pane, true) ||
+                (layered && !SetLayeredWindowAttributes(pane, 0, alphas[column], LWA_ALPHA))) {
+                if (pane) DestroyWindow(pane);
+                DestroyWindow(g_alphaLab.control);
+                return 3;
+            }
+            if (!layered && !ApplyAlphaLabPane(AlphaLabPane{pane, alphas[column], false}, alphas[column])) {
+                DestroyWindow(pane);
+                DestroyWindow(g_alphaLab.control);
+                return 3;
+            }
+            g_alphaLab.panes.push_back(AlphaLabPane{pane, alphas[column], layered});
+
+        }
+    }
+
+    // The panels are top-level popup windows so Acrylic samples the moving
+    // pattern beneath them. Their owner keeps them above the pattern and ties
+    // their lifetime to the control window without involving target windows.
+    ShowWindow(g_alphaLab.pattern, SW_SHOWNOACTIVATE);
+    for (const AlphaLabPane& pane : g_alphaLab.panes) ShowWindow(pane.hwnd, SW_SHOWNOACTIVATE);
+    ShowWindow(g_alphaLab.control, SW_SHOWNORMAL);
+    UpdateWindow(g_alphaLab.control);
+
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    return 0;
+}
+
+// A non-interactive guard for build verification. It confirms both candidate
+// routes are accepted by this Windows build, but intentionally does not claim
+// visual success: live blur, flicker, and focus behaviour require the lab on a
+// real desktop and human inspection.
+int BackdropAlphaLabSelfTest() {
+    if (!GetCompositionSetter() || !EnsureBackdropClass()) return 1;
+    HWND normal = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+                                  kBackdropClass, L"", WS_POPUP,
+                                  -30000, -30000, 64, 64, nullptr, nullptr, g_instance, nullptr);
+    HWND layered = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+                                   kBackdropClass, L"", WS_POPUP,
+                                   -30000, -30000, 64, 64, nullptr, nullptr, g_instance, nullptr);
+    const bool normalOk = normal && SetBackdropComposition(normal, true, AccentGradientColor(Color{0, 0, 0}, 153));
+    const bool layeredOk = layered && SetBackdropComposition(layered, true) &&
+                           SetLayeredWindowAttributes(layered, 0, 153, LWA_ALPHA) != FALSE;
+    if (normal) {
+        DisableBackdropComposition(normal);
+        DestroyWindow(normal);
+    }
+    if (layered) {
+        DisableBackdropComposition(layered);
+        DestroyWindow(layered);
+    }
+    std::wprintf(L"backdrop_alpha_lab normal=%d layered=%d\n", normalOk ? 1 : 0, layeredOk ? 1 : 0);
+    return normalOk && layeredOk ? 0 : 1;
 }
 
 bool WindowIdentityMatches(const WindowState& state) {
@@ -2000,14 +2318,13 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
             fresh.changedStyle = true;
         }
         fresh.recoveryMarkerSet = SetPropW(hwnd, kManagedProperty, ManagedMarker()) != FALSE;
-        // This is deliberately not a layered bitmap window. DWM must own the
-        // surface so it can continuously blur the real desktop behind it.
-        fresh.backdrop = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+        // The Alpha lab demonstrated that this Windows build preserves live
+        // Acrylic on a layered helper while accepting stable window alpha.
+        // Keep the material policy separate so this does not add DWM work to
+        // the focus-transition hot path.
+        fresh.backdrop = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
                                          kBackdropClass, L"", WS_POPUP, 0, 0, 0, 0,
                                          nullptr, nullptr, g_instance, nullptr);
-        // Tint is layered, but the backdrop above is intentionally not. A
-        // layered backdrop would turn DWM blur into a bitmap overlay and lose
-        // the real background sampling that makes window-blur-fx effective.
         fresh.tint = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
                                      kBackdropClass, L"", WS_POPUP, 0, 0, 0, 0,
                                      nullptr, nullptr, g_instance, nullptr);
@@ -2017,7 +2334,10 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
             RestoreWindowStyle(hwnd, fresh.originalExStyle, fresh.hadLayeredStyle, fresh.originalAlpha, fresh.originalColorKey, fresh.originalLayerFlags);
             return false;
         }
-        if (!SetLayeredWindowAttributes(fresh.tint, 0, 0, LWA_ALPHA)) {
+        // Start both layers hidden. ApplyWindow supplies their first real
+        // alpha before either helper is shown, avoiding a one-frame flash.
+        if (!SetLayeredWindowAttributes(fresh.backdrop, 0, 0, LWA_ALPHA) ||
+            !SetLayeredWindowAttributes(fresh.tint, 0, 0, LWA_ALPHA)) {
             DestroyWindow(fresh.tint);
             DestroyWindow(fresh.backdrop);
             RestoreWindowStyle(hwnd, fresh.originalExStyle, fresh.hadLayeredStyle,
@@ -2037,8 +2357,11 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
     const Color desiredTintColor = active ? rule.activeTint : rule.inactiveTint;
     const double tintStrength = active ? rule.activeTintStrength : rule.inactiveTintStrength;
     const double glassOpacity = active ? rule.activeGlassOpacity : rule.inactiveGlassOpacity;
+    const double backdropAlpha = active ? rule.activeBackdropAlpha : rule.inactiveBackdropAlpha;
     const BYTE desiredTintAlpha = static_cast<BYTE>(
         std::clamp(tintStrength * glassOpacity * 255.0, 0.0, 255.0));
+    const BYTE desiredBackdropAlpha = static_cast<BYTE>(
+        std::clamp(backdropAlpha * 255.0, 0.0, 255.0));
     const double targetOpacity = active ? rule.activeOpacity : rule.inactiveOpacity;
     state->rule = rule;
     state->ruleRevision = g_configRevision;
@@ -2050,11 +2373,13 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
     const bool transitionChanged = isFirstVisual || active != state->wasActive ||
                                    state->toOpacity != targetOpacity ||
                                    state->toTintAlpha != desiredTintAlpha ||
+                                   state->toBackdropAlpha != desiredBackdropAlpha ||
                                    !SameColor(state->toTintColor, desiredTintColor);
     if (isFirstVisual) {
         state->currentOpacity = state->fromOpacity = state->toOpacity = targetOpacity;
         state->tintColor = state->fromTintColor = state->toTintColor = desiredTintColor;
         state->tintAlpha = state->fromTintAlpha = state->toTintAlpha = desiredTintAlpha;
+        state->backdropAlpha = state->fromBackdropAlpha = state->toBackdropAlpha = desiredBackdropAlpha;
         state->transitionStart = now;
         state->visualInitialized = true;
     } else if (transitionChanged) {
@@ -2064,6 +2389,8 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
         state->toTintColor = desiredTintColor;
         state->fromTintAlpha = state->tintAlpha;
         state->toTintAlpha = desiredTintAlpha;
+        state->fromBackdropAlpha = state->backdropAlpha;
+        state->toBackdropAlpha = desiredBackdropAlpha;
         state->transitionStart = now;
     }
     state->wasActive = active;
@@ -2075,6 +2402,7 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
     state->currentOpacity = state->fromOpacity + (state->toOpacity - state->fromOpacity) * easedProgress;
     state->tintColor = LerpColor(state->fromTintColor, state->toTintColor, easedProgress);
     state->tintAlpha = LerpByte(state->fromTintAlpha, state->toTintAlpha, easedProgress);
+    state->backdropAlpha = LerpByte(state->fromBackdropAlpha, state->toBackdropAlpha, easedProgress);
     const bool transitionInFlight = progress < 1.0;
     if (transitionInFlight) g_visualAnimationActive = true;
     const BYTE targetAlpha = static_cast<BYTE>(std::clamp(state->currentOpacity * 255.0, 10.0, 255.0));
@@ -2099,6 +2427,17 @@ bool ApplyWindow(HWND hwnd, bool refreshRule, HWND foreground, ULONGLONG now) {
                 state->lastTintAlpha = state->tintAlpha;
                 state->tintApplied = true;
             }
+        }
+    }
+    if (state->backdrop) {
+        // Unlike SetWindowCompositionAttribute, this window-alpha update did
+        // not flash under the lab's continuous pulse test. Cache successful
+        // calls so stable windows make no redundant User32 transitions.
+        const bool backdropAlphaChanged = wasSuspended || !state->backdropAlphaApplied ||
+                                          state->lastBackdropAlpha != state->backdropAlpha;
+        if (backdropAlphaChanged && SetLayeredWindowAttributes(state->backdrop, 0, state->backdropAlpha, LWA_ALPHA)) {
+            state->lastBackdropAlpha = state->backdropAlpha;
+            state->backdropAlphaApplied = true;
         }
     }
     // Active windows and transitions retain 120 Hz geometry tracking. Stable
@@ -2204,7 +2543,11 @@ BOOL CALLBACK EnumSweepProc(HWND hwnd, LPARAM value) {
 
     wchar_t cls[128]{}; GetClassNameW(hwnd, cls, 128);
     const auto className = Lower(cls);
-    const bool ownWindow = className == Lower(kBackdropClass) || className == Lower(kTrayClass);
+    // A lab can run beside the resident instance. Keep every lab HWND out of
+    // both target selection and geometric occlusion, or the resident sweep
+    // would change the test control while it is meant to compare DWM alone.
+    const bool ownWindow = className == Lower(kBackdropClass) || className == Lower(kTrayClass) ||
+                           className == Lower(kAlphaLabPatternClass) || className == Lower(kAlphaLabControlClass);
     const bool eligible = !IsExcluded(hwnd);
     if (eligible) {
         HRGN windowRegion = CreateRectRgn(rect.left, rect.top, rect.right, rect.bottom);
@@ -2323,10 +2666,27 @@ bool RunCompositionSelfTest() {
     return accepted;
 }
 
+bool BackdropAlphaConfigSelfTest() {
+    // Exercise both public spellings without touching the user's on-disk
+    // configuration. This keeps a future parser refactor from accepting the
+    // new field in YAML but silently dropping the INI compatibility spelling.
+    Rule yamlRule{};
+    SetYamlStateField(yamlRule, true, L"backdrop_alpha", L"42");
+    SetYamlStateField(yamlRule, false, L"backdrop_alpha", L"0.73");
+    Rule iniRule{};
+    SetField(iniRule, L"active_backdrop_alpha", L"0.42");
+    SetField(iniRule, L"inactive_backdrop_alpha", L"0.73");
+    return std::abs(yamlRule.activeBackdropAlpha - 0.42) < 0.0001 &&
+           std::abs(yamlRule.inactiveBackdropAlpha - 0.73) < 0.0001 &&
+           std::abs(iniRule.activeBackdropAlpha - 0.42) < 0.0001 &&
+           std::abs(iniRule.inactiveBackdropAlpha - 0.73) < 0.0001;
+}
+
 int SelfTest() {
     if (!LoadConfig(g_config, g_configPath)) { std::fwprintf(stderr, L"config load failed: %ls\n", g_configPath.c_str()); return 2; }
+    if (!BackdropAlphaConfigSelfTest()) { std::fwprintf(stderr, L"backdrop alpha configuration parsing failed\n"); return 6; }
     if (!RunCompositionSelfTest()) { std::fwprintf(stderr, L"system Acrylic composition unavailable\n"); return 3; }
-    std::wprintf(L"config and system Acrylic API ok: %ls global enabled=%d active_target=%.2f glass=%.2f apps=%zu blacklist=%zu classes=%zu transition_ms=%d\n", g_configPath.c_str(), g_config.global.enabled ? 1 : 0, g_config.global.activeOpacity, g_config.global.activeGlassOpacity, g_config.apps.size(), g_config.blacklist.size(), g_config.blacklistClasses.size(), g_config.global.transitionMs);
+    std::wprintf(L"config and system Acrylic API ok: %ls global enabled=%d active_target=%.2f backdrop=%.2f glass=%.2f apps=%zu blacklist=%zu classes=%zu transition_ms=%d\n", g_configPath.c_str(), g_config.global.enabled ? 1 : 0, g_config.global.activeOpacity, g_config.global.activeBackdropAlpha, g_config.global.activeGlassOpacity, g_config.apps.size(), g_config.blacklist.size(), g_config.blacklistClasses.size(), g_config.global.transitionMs);
     // Listing the resolved matchers makes a rule that failed to parse visible
     // without having to watch a window behave differently. Specificity order is
     // what decides which entry wins, so it is printed in resolution order.
@@ -2393,6 +2753,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     if (wcsstr(commandLine, L"--self-test")) return SelfTest();
     if (wcsstr(commandLine, L"--update-self-test")) return UpdateSelfTest();
     if (wcsstr(commandLine, L"--check-updates")) return UpdateCheckDiagnostic();
+    if (wcsstr(commandLine, L"--backdrop-alpha-lab-self-test")) return BackdropAlphaLabSelfTest();
+    if (wcsstr(commandLine, L"--backdrop-alpha-lab")) {
+        // This diagnostic must be launched from the real user desktop. Unlike
+        // the resident process it does not relaunch through Explorer, because
+        // a relaunch would lose the requested lab command-line mode.
+        if (!CanSeeInteractiveDesktop()) return 4;
+        return RunBackdropAlphaLab();
+    }
     const bool relaunchAttempt = wcsstr(commandLine, L"--interactive-relaunch") != nullptr;
     if (!CanSeeInteractiveDesktop()) {
         if (!relaunchAttempt && RelaunchOnExplorerDesktop()) {

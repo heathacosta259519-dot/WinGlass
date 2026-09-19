@@ -189,7 +189,8 @@ global:
     enable_glass: true          # frosted backdrop on/off
     exclude_fullscreen: true    # restore the original window during full-screen video
     glass_color: "#00345A"      # glass tint
-    glass_opacity: 0.98         # glass density ceiling
+    backdrop_alpha: 1.0         # Acrylic backdrop opacity (lower = more desktop visible)
+    glass_opacity: 0.98         # legacy tint-density multiplier
     tint_opacity: 0.30          # tint strength
     animation_duration_ms: 120  # focus-transition duration
   unfocused:                    # unfocused: a completely independent set
@@ -197,6 +198,7 @@ global:
     enable_glass: true
     exclude_fullscreen: true
     glass_color: "#00345A"
+    backdrop_alpha: 1.0
     glass_opacity: 0.96
     tint_opacity: 0.20
     animation_duration_ms: 120
@@ -228,7 +230,8 @@ applications:
 | `enable_glass` | `active_acrylic` / `inactive_acrylic` | `true` / `false` | `true` | Frosted backdrop on/off; tint remains when off |
 | `exclude_fullscreen` | `exclude_fullscreen` | `true` / `false` | `true` | Temporarily restore full-screen, borderless windows such as browser video and games |
 | `glass_color` | `active_tint_color` / `inactive_tint_color` | `#RRGGBB` | `#2C3E58` / `#1F2A3C` | Glass colour |
-| `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | Glass density ceiling |
+| `backdrop_alpha` | `active_backdrop_alpha` / `inactive_backdrop_alpha` | `0–1` | `1.0` / `1.0` | Opacity of the live Acrylic backdrop; lower values reveal more of the real desktop |
+| `glass_opacity` | `active_glass_opacity` / `inactive_glass_opacity` | `0–1` | `0.98` / `0.96` | Legacy tint-density multiplier, retained for configuration compatibility |
 | `tint_opacity` | `active_tint_strength` / `inactive_tint_strength` | `0–1` | `0.34` / `0.30` | Tint strength |
 | `animation_duration_ms` | `transition_ms` | `0–5000` | `180` | Focus-transition duration; `0` = instant |
 | `blacklist: - process` | `<processname>=true` under `[Blacklist]` | — | — | Skip by executable file name |
@@ -243,7 +246,7 @@ A few conventions:
 
 ### Config editor
 
-`winglass-config.exe` provides a GUI covering the master switch, focused/unfocused opacity, glass on/off, colour, density, animation duration and the blacklist. Saving **atomically replaces** `config.yaml` (temp file first, then replace, so a failure mid-save cannot truncate your configuration), first snapshots the previous file as `config.yaml.bak`, and refuses to overwrite a file changed outside the editor. The running main process hot-reloads automatically.
+`winglass-config.exe` provides a GUI covering the master switch, focused/unfocused target opacity, live Acrylic backdrop opacity, glass on/off, colour, tint density, animation duration and the blacklist. Saving **atomically replaces** `config.yaml` (temp file first, then replace, so a failure mid-save cannot truncate your configuration), first snapshots the previous file as `config.yaml.bak`, and refuses to overwrite a file changed outside the editor. The running main process hot-reloads automatically.
 
 Focused and unfocused panels also include an “exclude full-screen video” checkbox; clear it when that state should continue applying the effect to a full-screen browser window.
 
@@ -274,6 +277,8 @@ Both `CF_DIBV5` / `CF_DIB` (what nearly every screenshot tool publishes) and a c
 |---|---|
 | *(none)* | Run as a resident process |
 | `--self-test` | Parse the configuration and verify the system accepts the glass composition strategy (exit codes: `0` success / `2` config read failure / `3` composition unavailable) |
+| `--backdrop-alpha-lab-self-test` | Verify that the current DWM accepts both candidate backdrop-Alpha composition routes without opening visible windows |
+| `--backdrop-alpha-lab` | Open the interactive Alpha lab: five normal Acrylic panels and five layered Acrylic panels over a moving pattern. It changes no configuration or application window |
 | `--palette-self-test` | Config editor only: decode the clipboard image and print the extracted palette, to diagnose screenshot/colour problems |
 | `--interactive-relaunch` | Internal: second launch marker after handing over from an isolated desktop to the user desktop |
 | `--set-startup=enable\|disable` | Internal: helper mode that only writes the registry autostart entry when elevation is required in a restricted environment |

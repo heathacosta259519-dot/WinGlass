@@ -26,6 +26,14 @@ not a commit-by-commit log, and not the internal development journal.
   release at startup, display a notification-area alert, and offer a download
   command. `check_updates` controls the feature; local parser and version
   comparison diagnostics are available without making a network request.
+- **Backdrop Alpha lab** — `--backdrop-alpha-lab` places normal and layered
+  Acrylic panes over a moving compositor surface for an explicit visual choice
+  of the future adjustable-backdrop route. The paired self-test checks API
+  acceptance without opening visible windows.
+- **Adjustable Acrylic backdrop opacity** — `backdrop_alpha` now controls the
+  layered live-Acrylic helper per focused/unfocused state, including smooth
+  focus transitions, YAML/INI parsing, and the settings editor. Existing
+  `glass_opacity` configurations retain their tint-density behaviour.
 
 ### Changed
 

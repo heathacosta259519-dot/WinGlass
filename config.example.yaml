@@ -46,7 +46,8 @@ global:
     enable_glass: true         # 是否启用磨砂背板；关掉仍保留纯染色
     exclude_fullscreen: true   # 全屏视频/游戏时恢复原窗口，不覆盖画面
     glass_color: "#00345A"     # 玻璃颜色 #RRGGBB
-    glass_opacity: 0.98        # 玻璃浓度上限
+    backdrop_alpha: 1.0        # 磨砂背板不透明度，0–1；越低越能看清真实桌面
+    glass_opacity: 0.98        # 旧版 tint 浓度系数（为兼容保留）
     tint_opacity: 0.38         # 染色强度
     animation_duration_ms: 120 # 焦点切换动画时长（毫秒），0 = 立即切换
   unfocused:                   # 失焦态：与聚焦态完全独立的另一套参数
@@ -54,6 +55,7 @@ global:
     enable_glass: true
     exclude_fullscreen: true
     glass_color: "#00345A"
+    backdrop_alpha: 1.0
     glass_opacity: 0.96
     tint_opacity: 0.20
     animation_duration_ms: 120
